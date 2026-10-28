@@ -1,0 +1,22 @@
+{
+  "skills": {
+    "documents": {
+      "active": true
+    },
+    "pdf": {
+      "active": true
+    },
+    "skill-creator": {
+      "active": true
+    },
+    "spreadsheets": {
+      "active": true
+    },
+    "image-search": {
+      "active": true
+    },
+    "skills-mcp-manager": {
+      "active": true
+    }
+  }
+}

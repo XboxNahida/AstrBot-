@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "enable_ttl_cache": true,
+  "image_caption_cache_ttl": 600,
+  "enable_image_count_cache": true,
+  "max_cached_images": 200,
+  "patch_main_agent": true,
+  "force_caption_for_vision_models": true,
+  "patch_quoted_message": true,
+  "fingerprint_remote_images": true,
+  "remote_fingerprint_timeout": 8,
+  "remote_fingerprint_max_bytes": 20971520
+}

@@ -1,0 +1,6 @@
+{
+  "api_key": "",
+  "command_result_chunk_size": 1200,
+  "chunk_private_command_results": true,
+  "chunk_group_command_results": false
+}

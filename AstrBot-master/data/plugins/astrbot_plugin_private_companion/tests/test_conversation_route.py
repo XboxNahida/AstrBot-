@@ -1,0 +1,598 @@
+import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from astrbot.core.provider import Provider
+from astrbot.core.provider.entities import LLMResponse, ProviderRequest
+from astrbot_plugin_private_companion import conversation_route as route
+from astrbot_plugin_private_companion.capability_hub import CapabilityDecision
+
+
+def fake_provider(identity):
+    item = MagicMock(spec=Provider)
+    item.provider_config = {"id": identity, "model": identity}
+    item.get_model.return_value = identity
+    item.text_chat = AsyncMock()
+    return item
+
+
+class ConversationRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.providers = {
+            name: fake_provider(name)
+            for name in (
+                "gemini",
+                "grok",
+                "kimi",
+                "gpt",
+                "gpt-fallback",
+                "deepseek",
+                "claude",
+            )
+        }
+        self.plugin = SimpleNamespace(
+            enable_conversation_model_routing=True,
+            conversation_chat_provider_id="gemini",
+            conversation_chat_fallback_provider_id="grok",
+            conversation_task_provider_id="gpt",
+            conversation_task_fallback_provider_id="gpt-fallback",
+            context=SimpleNamespace(get_provider_by_id=self.providers.get),
+        )
+        self.event = SimpleNamespace()
+
+    def request(self, kind):
+        decision = CapabilityDecision(
+            True, "text", "neutral", (), False, "test", route=kind
+        )
+        self.event._private_companion_capability_decision = decision
+        req = ProviderRequest(
+            prompt="用户消息", system_prompt="当前人格：小七", model="旧模型"
+        )
+        route.configure_conversation_request(self.plugin, self.event, req)
+        return req
+
+    def test_chat_uses_chat_whitelist_and_removes_work_tools(self):
+        req = self.request("chat")
+        self.assertEqual("gemini", req.provider_id)
+        self.assertEqual(["grok"], req.fallback_provider_ids)
+        self.assertIsNone(req.model)
+        self.assertIsNone(req.func_tool)
+
+    def test_route_diagnostics_use_astrbot_logger(self):
+        with self.assertLogs("astrbot", level="INFO") as captured:
+            self.request("task")
+        self.assertTrue(any("Companion request route selected" in line for line in captured.output))
+
+    def test_task_uses_gpt_and_keeps_chat_presentation_context(self):
+        req = self.request("task")
+        self.assertEqual("gpt", req.provider_id)
+        self.assertEqual(["gpt-fallback"], req.fallback_provider_ids)
+        self.assertTrue(req.disable_streaming)
+        self.assertTrue(req.final_response_only)
+        self.assertEqual(
+            "当前人格：小七", self.event._private_companion_chat_system_prompt
+        )
+
+    def test_task_accepts_user_selected_non_gpt_provider(self):
+        self.plugin.conversation_task_provider_id = "kimi"
+        self.plugin.conversation_task_fallback_provider_id = "gemini"
+        req = self.request("task")
+        self.assertEqual("kimi", req.provider_id)
+        self.assertEqual(["gemini"], req.fallback_provider_ids)
+
+    def test_forbidden_chat_family_rejected_in_primary_and_backup(self):
+        for field in (
+            "conversation_chat_provider_id",
+            "conversation_chat_fallback_provider_id",
+        ):
+            for identity in ("gpt", "deepseek", "claude"):
+                with self.subTest(field=field, identity=identity):
+                    setattr(self.plugin, field, identity)
+                    with self.assertRaises(ValueError):
+                        self.request("chat")
+            setattr(
+                self.plugin,
+                field,
+                "gemini" if field.endswith("chat_provider_id") else "grok",
+            )
+
+    def test_missing_api_configuration_does_not_fall_through_to_gpt(self):
+        self.plugin.conversation_chat_provider_id = ""
+        with self.assertRaises(ValueError):
+            self.request("chat")
+
+    def test_unavailable_hub_does_not_silently_route_work_to_chat(self):
+        self.event._private_companion_capability_decision = CapabilityDecision(
+            True, "text", "neutral", (), False, "hub_unavailable"
+        )
+        with self.assertRaises(ValueError):
+            route.configure_conversation_request(
+                self.plugin, self.event, ProviderRequest()
+            )
+
+    def test_disabled_feature_preserves_original_request(self):
+        self.plugin.enable_conversation_model_routing = False
+        req = self.request("chat")
+        self.assertIsNone(req.provider_id)
+        self.assertIsNone(req.fallback_provider_ids)
+
+    def test_rejudged_task_is_applied_to_current_request(self):
+        self.request("chat")
+        req = self.request("mixed")
+        self.assertEqual("gpt", req.provider_id)
+        self.assertEqual("mixed", self.event._private_companion_conversation_route)
+
+    def test_task_fallback_can_use_any_enabled_provider(self):
+        self.plugin.conversation_task_fallback_provider_id = "gemini"
+        req = self.request("task")
+        self.assertEqual(["gemini"], req.fallback_provider_ids)
+
+
+class TaskPresentationTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.gemini = fake_provider("gemini")
+        self.grok = fake_provider("grok")
+        self.gemini.text_chat.return_value = LLMResponse(
+            role="assistant", completion_text="给你看，别再说我没认真。"
+        )
+        self.grok.text_chat.return_value = LLMResponse(
+            role="assistant", completion_text="结果在这儿。"
+        )
+        self.plugin = SimpleNamespace(
+            enable_conversation_model_routing=True,
+            context=SimpleNamespace(
+                get_provider_by_id={"gemini": self.gemini, "grok": self.grok}.get
+            ),
+        )
+        self.event = SimpleNamespace(
+            _private_companion_conversation_route="task",
+            _private_companion_chat_provider_ids=["gemini", "grok"],
+            _private_companion_chat_system_prompt="小七人格和短期状态",
+            message_str="帮我算数并写代码",
+            unified_msg_origin="test:private:u1",
+        )
+
+    async def test_task_code_numbers_and_failure_are_preserved_exactly(self):
+        from astrbot.core.message.message_event_result import MessageChain
+
+        original = (
+            "结果：12.3400\n```python\nprint(1 + 2)\n```\n工具返回：Permission denied"
+        )
+        resp = LLMResponse(
+            role="assistant",
+            completion_text=original,
+            result_chain=MessageChain().message(original),
+        )
+        await route.present_task_response(self.plugin, self.event, resp)
+        self.assertEqual(
+            "给你看，别再说我没认真。\n\n" + original, resp.completion_text
+        )
+        self.assertEqual(resp.completion_text, resp.result_chain.get_plain_text())
+        self.assertIsNone(self.gemini.text_chat.await_args.kwargs.get("func_tool"))
+        self.assertIn(
+            "小七人格和短期状态",
+            self.gemini.text_chat.await_args.kwargs["system_prompt"],
+        )
+        await route.present_task_response(self.plugin, self.event, resp)
+        self.gemini.text_chat.assert_awaited_once()
+
+    async def test_only_chat_backup_is_used_after_primary_failure(self):
+        self.gemini.text_chat.side_effect = RuntimeError("offline")
+        resp = LLMResponse(role="assistant", completion_text="任务未完成：网络失败")
+        await route.present_task_response(self.plugin, self.event, resp)
+        self.grok.text_chat.assert_awaited_once()
+        self.assertTrue(resp.completion_text.endswith("任务未完成：网络失败"))
+
+    async def test_both_chat_failures_keep_result_with_honest_fixed_message(self):
+        self.gemini.text_chat.side_effect = RuntimeError("offline")
+        self.grok.text_chat.side_effect = RuntimeError("offline")
+        resp = LLMResponse(role="assistant", completion_text="任务失败：没有权限")
+        await route.present_task_response(self.plugin, self.event, resp)
+        self.assertIn("聊天模型暂时不可用", resp.completion_text)
+        self.assertTrue(resp.completion_text.endswith("任务失败：没有权限"))
+        self.assertNotIn("已完成", resp.completion_text)
+
+    async def test_registry_failure_preserves_result_and_clears_stored_reasoning(self):
+        self.plugin.context.get_provider_by_id = MagicMock(
+            side_effect=RuntimeError("registry unavailable")
+        )
+        self.event.set_extra = MagicMock()
+        resp = LLMResponse(
+            role="assistant",
+            completion_text="任务失败：没有权限",
+            reasoning_content="内部推理",
+        )
+        await route.present_task_response(self.plugin, self.event, resp)
+        self.assertTrue(resp.completion_text.endswith("任务失败：没有权限"))
+        self.assertIn("聊天模型暂时不可用", resp.completion_text)
+        self.assertIsNone(resp.reasoning_content)
+        self.event.set_extra.assert_called_with("_llm_reasoning_content", None)
+
+    async def test_task_presentation_rechecks_core_blocked_endpoint(self):
+        from astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal import (
+            decoded_blocked,
+        )
+
+        self.gemini.provider_config["api_base"] = "https://" + decoded_blocked[0]
+        resp = LLMResponse(role="assistant", completion_text="原结果")
+        await route.present_task_response(self.plugin, self.event, resp)
+        self.gemini.text_chat.assert_not_awaited()
+        self.grok.text_chat.assert_awaited_once()
+
+    async def test_chat_and_tool_intermediates_are_not_rephrased(self):
+        for kind, tools in (("chat", []), ("task", ["search"])):
+            self.event._private_companion_conversation_route = kind
+            resp = LLMResponse(
+                role="assistant", completion_text="原话", tools_call_name=tools
+            )
+            await route.present_task_response(self.plugin, self.event, resp)
+            self.assertEqual("原话", resp.completion_text)
+        self.gemini.text_chat.assert_not_awaited()
+
+    async def test_generated_numeric_claim_is_rejected(self):
+        self.gemini.text_chat.return_value = LLMResponse(
+            role="assistant", completion_text="已经成功发送了 10 条消息。"
+        )
+        resp = LLMResponse(role="assistant", completion_text="发送失败")
+        await route.present_task_response(self.plugin, self.event, resp)
+        self.assertNotIn("10", resp.completion_text)
+        self.assertTrue(resp.completion_text.endswith("发送失败"))
+
+    async def test_task_ack_uses_chat_model_and_only_sends_once(self):
+        from astrbot_plugin_private_companion.conversation_task_state import ConversationTaskStateStore
+
+        self.plugin._conversation_task_states = ConversationTaskStateStore()
+        state = self.plugin._conversation_task_states.start_task(
+            session_key="test:private:u1", task_text="分析项目", provider_id="gpt", estimated_seconds=90
+        )
+        self.event._private_companion_task_id = state.task_id
+        self.event.send = AsyncMock()
+        self.event.plain_result = lambda text: text
+        self.gemini.text_chat.return_value = LLMResponse(role="assistant", completion_text="我先去处理一下，别催。")
+        await route.send_task_ack(self.plugin, self.event)
+        await route.send_task_ack(self.plugin, self.event)
+        self.assertEqual(1, self.event.send.await_count)
+        self.assertIn("处理", self.event.send.await_args.args[0])
+
+    async def test_task_failure_keeps_unfinished_state_and_uses_chat_model(self):
+        from astrbot_plugin_private_companion.conversation_task_state import ConversationTaskStateStore
+
+        self.plugin._conversation_task_states = ConversationTaskStateStore()
+        state = self.plugin._conversation_task_states.start_task(
+            session_key="test:private:u1", task_text="继续分析项目", provider_id="gpt"
+        )
+        self.event._private_companion_task_id = state.task_id
+        self.event.send = AsyncMock()
+        self.event.plain_result = lambda text: text
+        await route.send_task_failure(self.plugin, self.event, "E_LLM_ALL_PROVIDERS_FAILED")
+        saved = self.plugin._conversation_task_states.get(state.task_id)
+        self.assertEqual("failed", saved.status)
+        self.assertIn("分析项目", saved.unfinished_task)
+        self.assertEqual(1, self.event.send.await_count)
+
+
+class TaskNoticeContextTests(unittest.IsolatedAsyncioTestCase):
+    setUp = TaskPresentationTests.setUp
+    def prepare_task(self, text="后端还是有问题，再写一个测试，我观察后端"):
+        from astrbot_plugin_private_companion.conversation_task_state import ConversationTaskStateStore
+
+        self.plugin._conversation_task_states = ConversationTaskStateStore()
+        state = self.plugin._conversation_task_states.start_task(
+            session_key=self.event.unified_msg_origin,
+            task_text=text, provider_id="user-selected-task-model",
+        )
+        self.event._private_companion_task_id = state.task_id
+        self.event.message_str = text
+        self.event.send = AsyncMock()
+        self.event.plain_result = lambda value: value
+        self.event._private_companion_conversation_request = ProviderRequest(
+            prompt=text, contexts=[
+                {"role": "user", "content": "我在检查机器人后端"},
+                {"role": "assistant", "content": "那我补测试，你观察后端。"},
+            ],
+        )
+        return state
+
+    async def test_all_notices_strip_internal_markers(self):
+        for kind in ("ack", "progress", "failure"):
+            with self.subTest(kind=kind):
+                self.prepare_task()
+                self.gemini.text_chat.return_value = LLMResponse(
+                    role="assistant",
+                    completion_text="<think>不能发出的内部内容</think>我还在处理。 &&work&& [[PCTTS:secret]]",
+                )
+                if kind == "failure":
+                    await route.send_task_failure(self.plugin, self.event, "网络异常")
+                else:
+                    await getattr(route, "send_task_" + kind)(self.plugin, self.event)
+                sent = self.event.send.await_args.args[0]
+                self.assertNotIn("&&", sent)
+                self.assertNotIn("PCTTS", sent)
+                self.assertNotIn("内部内容", sent)
+
+    async def test_progress_receives_recent_context_and_sent_ack(self):
+        import json
+
+        self.prepare_task()
+        self.gemini.text_chat.return_value = LLMResponse(role="assistant", completion_text="我来补测试，你先看后端。")
+        await route.send_task_ack(self.plugin, self.event)
+        await route.send_task_progress(self.plugin, self.event)
+        args = self.gemini.text_chat.await_args.kwargs
+        payload = json.loads(args["prompt"])
+        self.assertEqual(self.event.message_str, payload["user_message"])
+        self.assertIn("我来补测试，你先看后端。", str(payload["previous_replies"]))
+        self.assertIn("我在检查机器人后端", str(args["contexts"]))
+
+    async def test_progress_reads_the_requested_task_not_newest_task(self):
+        import json
+
+        state = self.prepare_task("补写后端测试")
+        self.plugin._conversation_task_states.start_task(
+            session_key=self.event.unified_msg_origin,
+            task_text="另一个无关任务", provider_id="other-model",
+        )
+        await route.send_task_progress(self.plugin, self.event)
+        payload = json.loads(self.gemini.text_chat.await_args.kwargs["prompt"])
+        self.assertEqual(state.task_id, payload["task"]["task_id"])
+        self.assertNotIn("另一个无关任务", str(payload))
+
+    async def test_wait_notice_does_not_invent_execution_progress(self):
+        state = self.prepare_task()
+        await route.send_task_progress(self.plugin, self.event)
+        self.assertEqual("", state.progress_note)
+        self.assertEqual("running", state.status)
+
+    async def test_progress_is_discarded_if_task_finishes_during_generation(self):
+        state = self.prepare_task()
+
+        async def complete(**kwargs):
+            self.plugin._conversation_task_states.complete_task(state.task_id, "测试结果")
+            return LLMResponse(role="assistant", completion_text="还在等待结果。")
+
+        self.gemini.text_chat.side_effect = complete
+        await route.send_task_progress(self.plugin, self.event)
+        self.event.send.assert_not_awaited()
+
+    async def test_notice_never_reads_another_session_task(self):
+        self.prepare_task()
+        self.event.unified_msg_origin = "test:private:other-user"
+        await route.send_task_ack(self.plugin, self.event)
+        self.event.send.assert_not_awaited()
+        self.gemini.text_chat.assert_not_awaited()
+
+    async def test_final_opening_cleans_markers_and_preserves_literal_code(self):
+        self.prepare_task()
+        self.gemini.text_chat.return_value = LLMResponse(role="assistant", completion_text="给你看。 &&work&&")
+        original = "结果：12.3400\n```python\nprint('&&work&&')\n```"
+        response = LLMResponse(role="assistant", completion_text=original)
+        await route.present_task_response(self.plugin, self.event, response)
+        self.assertEqual("给你看。\n\n" + original, response.completion_text)
+
+    async def test_concurrent_acknowledgements_only_deliver_once(self):
+        import asyncio
+
+        self.prepare_task()
+        await asyncio.gather(route.send_task_ack(self.plugin, self.event), route.send_task_ack(self.plugin, self.event))
+        self.event.send.assert_awaited_once()
+        self.gemini.text_chat.assert_awaited_once()
+
+    async def test_failed_delivery_is_retryable_and_not_added_to_history(self):
+        self.prepare_task()
+        self.event.send.side_effect = RuntimeError("platform offline")
+        with self.assertRaises(RuntimeError):
+            await route.send_task_ack(self.plugin, self.event)
+        self.assertFalse(getattr(self.event, "_private_companion_task_ack_sent", False))
+        self.assertFalse(getattr(self.event, "_private_companion_task_notice_history", []))
+        self.event.send.side_effect = None
+        await route.send_task_ack(self.plugin, self.event)
+        self.assertTrue(self.event._private_companion_task_ack_sent)
+
+    async def test_unstarted_task_cannot_claim_test_is_running(self):
+        self.prepare_task()
+        self.gemini.text_chat.return_value = LLMResponse(role="assistant", completion_text="测试还在跑着呢，等后端稳了我再看。")
+        self.grok.text_chat.return_value = LLMResponse(role="assistant", completion_text="测试已经运行了百分之八十。")
+        await route.send_task_progress(self.plugin, self.event)
+        self.assertIn("结果", self.event.send.await_args.args[0])
+        self.assertNotIn("测试还在跑", self.event.send.await_args.args[0])
+
+    async def test_failure_notice_never_accepts_a_success_claim(self):
+        self.prepare_task()
+        for provider in (self.gemini, self.grok):
+            provider.text_chat.return_value = LLMResponse(role="assistant", completion_text="任务已经全部完成了。")
+        await route.send_task_failure(self.plugin, self.event, "真实失败")
+        self.assertIn("没能完成", self.event.send.await_args.args[0])
+
+    async def test_final_result_control_cleanup_preserves_code_and_numbers(self):
+        self.prepare_task()
+        original = "结果12.3400。 &&work&&\n```python\nprint('&&work&&')\n```"
+        response = LLMResponse(role="assistant", completion_text=original)
+        await route.present_task_response(self.plugin, self.event, response)
+        self.assertNotIn("结果12.3400。 &&work&&", response.completion_text)
+        self.assertIn("print('&&work&&')", response.completion_text)
+
+
+class ConversationHookTests(unittest.IsolatedAsyncioTestCase):
+    async def test_progress_query_accepts_zero_and_subminute_delays(self):
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        plugin = SimpleNamespace(
+            enabled=True, enable_conversation_model_routing=True,
+            _create_lifecycle_background_task=lambda coro, **kwargs: coro.close(),
+        )
+        for estimate, expected in ((0, 0), (10, 10), (30, 30), (60, 60), (120, 120), (300, 120)):
+            with self.subTest(estimate=estimate):
+                event = SimpleNamespace(
+                    _private_companion_capability_decision=SimpleNamespace(reply=True),
+                    _private_companion_task_id="test-task",
+                    _private_companion_task_estimated_seconds=estimate,
+                )
+                with (
+                    patch("astrbot_plugin_private_companion.main.configure_conversation_request"),
+                    patch("astrbot_plugin_private_companion.main.send_task_ack", new_callable=AsyncMock),
+                    patch("astrbot_plugin_private_companion.main.delayed_task_progress", new_callable=AsyncMock) as progress,
+                ):
+                    await PrivateCompanionPlugin.route_conversation_models.__wrapped__(plugin, event, ProviderRequest())
+                    progress.assert_called_once_with(plugin, event, expected)
+
+    async def test_progress_timer_does_not_add_a_minimum_wait(self):
+        with (
+            patch.object(route.asyncio, "sleep", new_callable=AsyncMock) as sleep,
+            patch.object(route, "send_task_progress", new_callable=AsyncMock) as progress,
+        ):
+            await route.delayed_task_progress("plugin", "event", 0)
+            sleep.assert_awaited_once_with(0.0)
+            progress.assert_awaited_once_with("plugin", "event")
+
+    async def test_request_hook_sends_ack_and_schedules_progress_for_task(self):
+        from astrbot_plugin_private_companion.conversation_task_state import ConversationTaskStateStore
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        chat = fake_provider("gemini")
+        chat.text_chat.return_value = LLMResponse(role="assistant", completion_text="我先处理，等下回来。")
+        task = fake_provider("task-model")
+        pending = []
+        plugin = SimpleNamespace(
+            enabled=True,
+            enable_conversation_model_routing=True,
+            conversation_chat_provider_id="gemini",
+            conversation_chat_fallback_provider_id="",
+            conversation_task_provider_id="task-model",
+            context=SimpleNamespace(get_provider_by_id={"gemini": chat, "task-model": task}.get),
+            _conversation_task_states=ConversationTaskStateStore(),
+            _create_lifecycle_background_task=lambda coro, **kwargs: pending.append(coro),
+        )
+        event = SimpleNamespace(
+            unified_msg_origin="test:session",
+            message_str="写一个网页版贪吃蛇",
+            _private_companion_capability_decision=CapabilityDecision(
+                True, "text", "neutral", (), False, "test", route="task", estimated_seconds=90,
+            ),
+            send=AsyncMock(), plain_result=lambda text: text, stop_event=MagicMock(),
+        )
+        try:
+            req = ProviderRequest(prompt=event.message_str)
+            await PrivateCompanionPlugin.route_conversation_models.__wrapped__(plugin, event, req)
+            self.assertEqual("task-model", req.provider_id)
+            event.send.assert_awaited_once_with("我先处理，等下回来。")
+            self.assertEqual(1, len(pending))
+            task.text_chat.assert_not_awaited()
+            event.stop_event.assert_not_called()
+        finally:
+            for coro in pending:
+                coro.close()
+
+    async def test_framework_error_hook_notifies_and_retains_failed_task(self):
+        from astrbot.api.message_components import Plain
+        from astrbot_plugin_private_companion.conversation_task_state import ConversationTaskStateStore
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        plugin.enabled = True
+        plugin.enable_framework_error_leak_guard = True
+        plugin._record_passive_no_reply = MagicMock()
+        plugin._restore_response_review_meta_leak_before_send = MagicMock(return_value=False)
+        plugin._conversation_task_states = ConversationTaskStateStore()
+        state = plugin._conversation_task_states.start_task(
+            session_key="test:session", task_text="写网页版贪吃蛇", provider_id="task-model",
+        )
+        result = SimpleNamespace(chain=[Plain("Provider API Error: upstream timeout")])
+        event = SimpleNamespace(
+            unified_msg_origin="test:session", _private_companion_task_id=state.task_id,
+            get_result=lambda: result, set_result=MagicMock(), stop_event=MagicMock(),
+            send=AsyncMock(), plain_result=lambda text: text,
+        )
+        await PrivateCompanionPlugin.suppress_framework_error_leak_before_send.__wrapped__(plugin, event)
+        self.assertEqual("failed", plugin._conversation_task_states.get(state.task_id).status)
+        self.assertIn("贪吃蛇", plugin._conversation_task_states.get(state.task_id).unfinished_task)
+        event.send.assert_awaited_once()
+        event.stop_event.assert_called_once()
+
+    async def test_merged_work_request_is_judged_before_search_tools_are_removed(self):
+        from unittest.mock import patch
+
+        from astrbot_plugin_private_companion.passive_state_pipeline import (
+            append_capability_guidance,
+            gate_request_search_tools,
+        )
+
+        for private in (True, False):
+            with self.subTest(private=private):
+                tools = SimpleNamespace(
+                    names=lambda: ["web_search_test"],
+                    tools=[SimpleNamespace(name="web_search_test")],
+                    remove_tool=MagicMock(),
+                )
+                first = CapabilityDecision(
+                    True, "text", "neutral", (), False, "first", route="chat"
+                )
+                merged = CapabilityDecision(
+                    True, "text", "neutral", ("search",), False, "merged", route="task"
+                )
+                event = SimpleNamespace(
+                    unified_msg_origin="test:session",
+                    message_str="在吗",
+                    is_private_chat=lambda: private,
+                    get_sender_id=lambda: "u1",
+                    get_sender_name=lambda: "甲",
+                    _private_companion_capability_decision=first,
+                )
+                consumer = AsyncMock(return_value="在吗\n再帮我搜索资料并写代码")
+                plugin = SimpleNamespace(
+                    enable_conversation_model_routing=True,
+                    _consume_semantic_message_buffer_for_event=consumer,
+                )
+                req = ProviderRequest(prompt="在吗", func_tool=tools)
+                judge = AsyncMock(return_value=merged)
+                with patch(
+                    "astrbot_plugin_private_companion.passive_state_pipeline.judge_capabilities",
+                    judge,
+                ):
+                    await append_capability_guidance(plugin, event, req)
+                    gate_request_search_tools(req)
+                    await append_capability_guidance(plugin, event, req)
+                self.assertEqual(
+                    "task", event._private_companion_capability_decision.route
+                )
+                self.assertIn("搜索资料", judge.await_args.args[1].current_text)
+                self.assertIn("搜索资料", req.prompt)
+                tools.remove_tool.assert_not_called()
+                consumer.assert_awaited_once()
+
+    async def test_request_hook_stops_missing_chat_configuration(self):
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        plugin = SimpleNamespace(
+            enabled=True,
+            enable_conversation_model_routing=True,
+            conversation_chat_provider_id="",
+        )
+        decision = CapabilityDecision(True, "text", "neutral", (), False, "test")
+        event = SimpleNamespace(
+            _private_companion_capability_decision=decision,
+            send=AsyncMock(),
+            plain_result=lambda text: text,
+            stop_event=MagicMock(),
+        )
+        req = ProviderRequest(prompt="hello")
+        await PrivateCompanionPlugin.route_conversation_models.__wrapped__(
+            plugin, event, req
+        )
+        event.stop_event.assert_called_once()
+        event.send.assert_awaited_once()
+        self.assertIsNone(req.provider_id)
+
+    async def test_task_history_records_presented_reply(self):
+        from astrbot.core.agent.message import Message
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        event = SimpleNamespace(
+            _private_companion_presented_task_text="小七承接\n\n结果"
+        )
+        ctx = SimpleNamespace(messages=[Message(role="assistant", content="结果")])
+        await PrivateCompanionPlugin.sync_conversation_task_history.__wrapped__(
+            SimpleNamespace(),
+            event,
+            ctx,
+            LLMResponse(role="assistant", completion_text="小七承接\n\n结果"),
+        )
+        self.assertEqual("小七承接\n\n结果", ctx.messages[-1].content[0].text)

@@ -1,0 +1,8 @@
+node_modules/
+.DS_Store
+dist/
+src/assets/mdi-subset/
+
+# Keep the bundled icon subset in this distribution.
+!src/assets/mdi-subset/
+!src/assets/mdi-subset/**

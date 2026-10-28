@@ -1,0 +1,68 @@
+{
+  "enabled": {
+    "description": "启用插件",
+    "type": "bool",
+    "hint": "关闭后不再给 AstrBot 图片转述流程打缓存补丁；修改后需要重载插件。",
+    "default": true
+  },
+  "enable_ttl_cache": {
+    "description": "启用 TTL 缓存策略",
+    "type": "bool",
+    "hint": "开启后，缓存条目会在指定秒数后过期。可与图片数量策略同时开启。",
+    "default": true
+  },
+  "image_caption_cache_ttl": {
+    "description": "图片转述缓存时长（秒）",
+    "type": "int",
+    "hint": "仅在 TTL 缓存策略开启时生效；设为 0 等同于关闭 TTL 策略，但不影响图片数量策略。",
+    "default": 600
+  },
+  "enable_image_count_cache": {
+    "description": "启用图片数量缓存策略",
+    "type": "bool",
+    "hint": "开启后，缓存最多保留指定数量的图片转述结果，超过上限会淘汰最久未使用的缓存。可与 TTL 策略同时开启。",
+    "default": true
+  },
+  "max_cached_images": {
+    "description": "最大缓存图片数量",
+    "type": "int",
+    "hint": "图片数量缓存策略的容量上限。多图转述会按实际图片张数占用容量。",
+    "default": 200
+  },
+  "patch_main_agent": {
+    "description": "缓存主对话图片转述",
+    "type": "bool",
+    "hint": "覆盖 AstrBot 主对话流程中的图片转述调用。",
+    "default": true
+  },
+  "force_caption_for_vision_models": {
+    "description": "原生视觉模型也强制转述",
+    "type": "bool",
+    "hint": "主模型支持图片时仍先调用专用图片转述模型并缓存描述，再让主模型基于文字描述回答；修改后需要重载插件。",
+    "default": true
+  },
+  "patch_quoted_message": {
+    "description": "缓存引用消息图片转述",
+    "type": "bool",
+    "hint": "覆盖 AstrBot 引用消息解析中的图片转述调用。",
+    "default": true
+  },
+  "fingerprint_remote_images": {
+    "description": "远程图片使用内容指纹",
+    "type": "bool",
+    "hint": "开启后会异步下载远程图片并用内容哈希作为缓存键，可解决平台临时 URL 每次变化导致的缓存 miss；失败时自动退回 URL 缓存键。",
+    "default": true
+  },
+  "remote_fingerprint_timeout": {
+    "description": "远程图片指纹超时（秒）",
+    "type": "float",
+    "hint": "远程图片内容指纹下载的最大等待时间。",
+    "default": 8
+  },
+  "remote_fingerprint_max_bytes": {
+    "description": "远程图片指纹最大下载字节数",
+    "type": "int",
+    "hint": "远程图片超过该大小时不下载内容，直接退回 URL 缓存键。",
+    "default": 20971520
+  }
+}

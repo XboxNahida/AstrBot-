@@ -1,0 +1,28 @@
+# Local environments and build products
+**/.venv/
+**/node_modules/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+**/bin/
+**/obj/
+**/*.pyc
+**/*.pdb
+**/*.log
+**/*.bak
+**/.env
+**/.env.local
+**/logs/
+**/temp/
+**/.DS_Store
+
+# Runtime configurations, credentials, conversations, and persona edits
+/AstrBot-master/data/*
+!/AstrBot-master/data/plugins/
+!/AstrBot-master/data/t2i_templates/
+!/AstrBot-master/data/skills/
+/AstrBot-master/astrbot.lock
+
+# Publish the verified launcher and immutable clean presets
+!/AstrBot启动器.exe
+!/发布预设/**

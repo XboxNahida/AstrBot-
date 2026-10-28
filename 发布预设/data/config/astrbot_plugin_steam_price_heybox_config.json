@@ -1,0 +1,12 @@
+{
+  "timeout_seconds": 15,
+  "default_country": "CN",
+  "default_language": "schinese",
+  "default_history_country": "CN",
+  "history_days": 720,
+  "history_event_limit": 5,
+  "global_price_limit": 10,
+  "show_api_links": true,
+  "llm_provider_id": "",
+  "llm_name_retry_count": 3
+}
