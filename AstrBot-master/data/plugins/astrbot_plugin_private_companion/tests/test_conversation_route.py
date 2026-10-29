@@ -412,6 +412,53 @@ class TaskNoticeContextTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConversationHookTests(unittest.IsolatedAsyncioTestCase):
+    async def test_route_failure_notices_are_bounded_per_bot_session_and_recover(self):
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        plugin = SimpleNamespace(enabled=True, enable_conversation_model_routing=True)
+        def event(session):
+            return SimpleNamespace(
+                unified_msg_origin=session,
+                _private_companion_capability_decision=SimpleNamespace(reply=True),
+                stop_event=MagicMock(), send=AsyncMock(), plain_result=lambda text: text,
+            )
+
+        first, repeated, other = event("a:GroupMessage:g1"), event("a:GroupMessage:g1"), event("b:GroupMessage:g1")
+        hook = PrivateCompanionPlugin.route_conversation_models.__wrapped__
+        with patch("astrbot_plugin_private_companion.main.configure_conversation_request", side_effect=ValueError("语境中枢暂时不可用")):
+            await hook(plugin, first, ProviderRequest())
+            await hook(plugin, repeated, ProviderRequest())
+            await hook(plugin, other, ProviderRequest())
+        first.send.assert_awaited_once()
+        repeated.send.assert_not_awaited()
+        repeated.stop_event.assert_called_once()
+        other.send.assert_awaited_once()
+        with patch("astrbot_plugin_private_companion.main.configure_conversation_request"):
+            await hook(plugin, event("a:GroupMessage:g1"), ProviderRequest())
+        recovered = event("a:GroupMessage:g1")
+        with patch("astrbot_plugin_private_companion.main.configure_conversation_request", side_effect=ValueError("语境中枢暂时不可用")):
+            await hook(plugin, recovered, ProviderRequest())
+        recovered.send.assert_awaited_once()
+
+    async def test_route_failure_notice_retries_after_cooldown_or_failed_delivery(self):
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        plugin = SimpleNamespace(enabled=True, enable_conversation_model_routing=True)
+        event = SimpleNamespace(
+            unified_msg_origin="a:FriendMessage:u1",
+            _private_companion_capability_decision=SimpleNamespace(reply=True),
+            stop_event=MagicMock(), send=AsyncMock(side_effect=[False, None, None]),
+            plain_result=lambda text: text,
+        )
+        hook = PrivateCompanionPlugin.route_conversation_models.__wrapped__
+        with (
+            patch("astrbot_plugin_private_companion.main.configure_conversation_request", side_effect=ValueError("中枢不可用")),
+            patch("astrbot_plugin_private_companion.main.time.monotonic", side_effect=[1000, 1001, 1002, 1301]),
+        ):
+            for _ in range(4):
+                await hook(plugin, event, ProviderRequest())
+        self.assertEqual(3, event.send.await_count)
+
     async def test_progress_query_accepts_zero_and_subminute_delays(self):
         from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 
@@ -568,6 +615,7 @@ class ConversationHookTests(unittest.IsolatedAsyncioTestCase):
         )
         decision = CapabilityDecision(True, "text", "neutral", (), False, "test")
         event = SimpleNamespace(
+            unified_msg_origin="default:FriendMessage:u1",
             _private_companion_capability_decision=decision,
             send=AsyncMock(),
             plain_result=lambda text: text,

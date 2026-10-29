@@ -1299,6 +1299,10 @@ const providerGroupByKey = providerGroups.reduce((acc, group) => {
 }, {});
 
 const featureMeta = {
+  enable_hub_group_batching: ["普通群消息合批判断", "固定短窗口共享一次中枢请求，每条消息独立判断。明确唤醒、任务控制、媒体和在途任务立即走原链路。"],
+  enable_hub_context_compaction: ["精简中枢上下文", "仅压缩中枢观察窗口和重复状态，保留当前完整消息、身份、任务保护和机器人协作证据，不删聊天记录。"],
+  enable_hub_persona_summary: ["中枢使用人格决策摘要", "本地提取不超过500字的身份、性格、情绪与边界摘录；人格修改自动更新，聊天模型仍使用完整人格。"],
+  enable_hub_decision_reuse: ["复用未变化的中枢判定", "同一事件语义输入不变时短期复用；消息、队列、人格、身份、任务或相关配置改变会重判。"],
   enable_proactive_only_mode: ["仅保留主动能力", "只让本插件负责主动私聊调度、生成和发送；普通私聊/群聊放行给默认主链或其他插件。"],
   enable_multi_persona_mode: ["多人格支持模式", "按人格隔离资料、日程、状态、日记、用户、群聊和 Token；同一窗口固定使用一个人格，避免串人格。"],
   enable_custom_relationship_stage_policy: ["启用好感度系统", "关闭后不记账、不更新关系或当前互动、不注入关系表达；用户档案和画像仍会更新，已有关系数据会保留。"],
@@ -1444,6 +1448,11 @@ const featureSearchAliases = {
 
 const featureGroups = [
   {
+    title: "中枢Token优化",
+    note: "四项独立开关，保存后全局即时生效，可逐项关闭进行对比。合批与判定按机器人和群隔离，仍使用各自人格。",
+    keys: ["enable_hub_group_batching", "enable_hub_context_compaction", "enable_hub_persona_summary", "enable_hub_decision_reuse"],
+  },
+  {
     title: "通用能力",
     note: "私聊、群聊和主动链路都会参考的状态、媒介、表达学习、收口与发送能力。",
     keys: [
@@ -1580,6 +1589,10 @@ const featureStageDefinitions = [
 
 const featureStageKeySets = {
   before: new Set([
+    "enable_hub_group_batching",
+    "enable_hub_context_compaction",
+    "enable_hub_persona_summary",
+    "enable_hub_decision_reuse",
     "inject_passive_states",
     "enable_message_debounce",
     "enable_recall_enhancement",
@@ -1872,6 +1885,8 @@ const safeFeatureKeys = [
 ];
 
 const configLabels = {
+  hub_group_batch_seconds: "中枢合批窗口（秒）",
+  hub_recent_message_limit: "中枢近期消息条数",
   auto_profile_platforms: "自动建档平台",
   default_nickname_strategy: "新用户默认称呼来源",
   default_proactive_enabled: "新用户默认主动权限",
@@ -2558,6 +2573,8 @@ const configLabels = {
 };
 
 const configDescriptions = {
+  hub_group_batch_seconds: "范围0至5秒，推荐2至3秒。从首条消息起算，不因新消息持续延长；明确唤醒和任务控制不等待。",
+  hub_recent_message_limit: "范围2至12条，默认6。只改变中枢观察输入，完整聊天上下文继续提供给回复模型。",
   default_interaction_band: "只影响之后建立的档案；亲近和爱意只能由主要用户账户使用。",
   relationship_stage_policy: "固定八阶段键与阈值，只编辑显示、语气、称呼尺度和软行为，不能授予权限。",
   relationship_positive_stage_cap_key: "普通用户（非主要用户）的自动加分与面板手动调分均不能超过该阶段，手动调分超限会明确报错；主要用户不受此上限及下调影响（专属联结模式下分数固定冻结）。",
@@ -3246,6 +3263,10 @@ const advancedCycleSettingKeys = [
 ];
 
 const featureSettingGroups = {
+  enable_hub_group_batching: ["hub_group_batch_seconds"],
+  enable_hub_context_compaction: ["hub_recent_message_limit"],
+  enable_hub_persona_summary: [],
+  enable_hub_decision_reuse: [],
   enable_auto_user_profile_creation: [
     "auto_profile_platforms",
     "default_nickname_strategy",
@@ -4211,6 +4232,8 @@ const featureSettingSections = {
 };
 
 const featureSettingTypes = {
+  hub_group_batch_seconds: { type: "number", min: 0, max: 5, step: 0.1 },
+  hub_recent_message_limit: { type: "number", min: 2, max: 12, step: 1 },
   photo_generation_private_owner_max_daily: { type: "number", min: -1, max: 100, step: 1 },
   photo_generation_private_friend_max_daily: { type: "number", min: -1, max: 100, step: 1 },
   photo_generation_group_max_daily: { type: "number", min: -1, max: 100, step: 1 },
@@ -27716,7 +27739,10 @@ function featureImpactLines(key) {
   const lines = [];
   const group = featureGroupForKey(key);
   lines.push(["模块", group]);
-  if (key === "enable_multi_persona_mode") {
+  if (["enable_hub_group_batching", "enable_hub_context_compaction", "enable_hub_persona_summary", "enable_hub_decision_reuse"].includes(key)) {
+    lines.push(["场景", ["enable_hub_group_batching", "enable_hub_context_compaction"].includes(key) ? "群聊中枢判断" : "私聊 / 群聊中枢判断"]);
+    lines.push(["配置范围", "全局生效；判断内容按机器人、群聊和人格分别处理"]);
+  } else if (key === "enable_multi_persona_mode") {
     lines.push(["场景", "私聊 / 群聊 / 日程 / 状态 / 日记 / Token"]);
   } else if (["enable_humanized_states", "inject_passive_states", "enable_health_state", "enable_hunger_state", "enable_cycle_state", "enable_skill_growth_simulation"].includes(key)) {
     lines.push(["场景", "日程 / 状态 / 私聊 / 群聊"]);

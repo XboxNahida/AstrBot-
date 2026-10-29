@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import unittest
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from astrbot.core.pipeline.context_utils import call_event_hook
+from astrbot.core.star.star import star_map
+from astrbot.core.star.star_handler import EventType, star_handlers_registry
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 
 
@@ -20,6 +25,9 @@ class Event:
 
     def stop_event(self):
         self.stopped = True
+
+    def is_stopped(self):
+        return self.stopped
 
     def is_private_chat(self) -> bool:
         return False
@@ -47,6 +55,75 @@ class HubPendingBatchTests(unittest.IsolatedAsyncioTestCase):
             "algorithm" if "复杂度" in text else "other"
         )
         self.plugin._topic_signature_similar = lambda left, right: left == right
+
+    def test_queue_hooks_are_registered_to_the_loaded_plugin_module(self):
+        expected = {
+            "guard_pending_message_debounce": EventType.OnWaitingLLMRequestEvent,
+            "guard_superseded_hub_request": EventType.OnLLMRequestEvent,
+            "settle_pending_message_debounce": EventType.OnLLMResponseEvent,
+            "confirm_pending_message_debounce_after_send": EventType.OnAfterMessageSentEvent,
+        }
+        handlers = star_handlers_registry.get_handlers_by_module_name(
+            PrivateCompanionPlugin.__module__
+        )
+        actual = {
+            handler.handler_name: handler.event_type
+            for handler in handlers
+            if handler.handler_name in expected
+        }
+        self.assertEqual(expected, actual)
+
+    async def test_framework_response_and_send_hooks_release_completed_queue(self):
+        event = Event("小七", "m1")
+        event.send = AsyncMock(return_value=None)
+        event.plugins_name = None
+        self.plugin._install_reaction_expression_delivery_tracker = lambda *_: None
+        self.plugin._reaction_expression_primary_reply_confirmed = lambda _: True
+        self.plugin._message_debounce_mark_llm_pending(event)
+        selected = [
+            handler
+            for handler in star_handlers_registry.get_handlers_by_module_name(
+                PrivateCompanionPlugin.__module__
+            )
+            if handler.handler_name
+            in {
+                "settle_pending_message_debounce",
+                "confirm_pending_message_debounce_after_send",
+            }
+        ]
+        patches = [
+            patch.object(
+                handler, "handler", functools.partial(handler.handler, self.plugin)
+            )
+            for handler in selected
+        ]
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(star_handlers_registry, "_handlers", selected)
+            )
+            stack.enter_context(
+                patch.object(
+                    star_map[PrivateCompanionPlugin.__module__],
+                    "name",
+                    "companion-test",
+                )
+            )
+            for binding in patches:
+                stack.enter_context(binding)
+            await call_event_hook(
+                event,
+                EventType.OnLLMResponseEvent,
+                SimpleNamespace(completion_text="在", result_chain=None),
+            )
+            await event.send(SimpleNamespace(chain=[]))
+            await call_event_hook(event, EventType.OnAfterMessageSentEvent)
+
+        self.assertEqual({}, self.plugin._message_debounce_pending_llm)
+        self.assertFalse(
+            self.plugin._message_debounce_absorb_pending_message(
+                Event("唯一支持小七的一次", "m2"), "唯一支持小七的一次"
+            )
+        )
 
     async def test_third_related_cross_sender_message_merges_pending_batch(
         self,

@@ -3595,7 +3595,6 @@ class EventDispatchMixin:
             if isinstance(candidates, dict):
                 candidates.pop(message_id, None)
 
-    @_ON_WAITING_LLM_REQUEST(priority=100000)
     async def guard_pending_message_debounce(self, event: AstrMessageEvent, *args: Any, **kwargs: Any) -> None:
         """在会话锁前收口补话，避免旧回复与新消息并发出站。"""
         if bool(getattr(self, "_central_hub_scheduler_enabled", False)):
@@ -3625,7 +3624,6 @@ class EventDispatchMixin:
         if text:
             self._message_debounce_absorb_pending_message(event, text)
 
-    @filter.on_llm_request(priority=300000)
     async def guard_superseded_hub_request(self, event: AstrMessageEvent, req: ProviderRequest, *args: Any, **kwargs: Any) -> bool:
         """Stop merged queued requests before enrichment or provider work.
 
@@ -3649,7 +3647,6 @@ class EventDispatchMixin:
             return True
         return False
 
-    @filter.on_llm_response(priority=100000)
     async def settle_pending_message_debounce(self, event: AstrMessageEvent, resp: LLMResponse, *args: Any, **kwargs: Any) -> None:
         key = self._message_debounce_pending_key(event)
         if not key:
@@ -3738,7 +3735,6 @@ class EventDispatchMixin:
         elif not active_id or active_id == message_id:
             store.pop(key, None)
 
-    @filter.after_message_sent(priority=11000)
     async def confirm_pending_message_debounce_after_send(
         self, event: AstrMessageEvent, *args: Any, **kwargs: Any
     ) -> None:

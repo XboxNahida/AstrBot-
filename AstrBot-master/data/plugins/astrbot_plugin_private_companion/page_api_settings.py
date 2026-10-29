@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -42,6 +43,17 @@ class PageSettingNormalizerMixin:
                 return normalized
         return self._normalize_page_schema_fallback(key, value)
     def _normalize_page_core_setting(self, key: str, value: Any) -> Any:
+        if key == "hub_group_batch_seconds":
+            try:
+                number = float(value)
+                return max(0.0, min(5.0, number)) if math.isfinite(number) else 2.5
+            except (TypeError, ValueError, OverflowError):
+                return 2.5
+        if key == "hub_recent_message_limit":
+            try:
+                return max(2, min(12, int(value)))
+            except (TypeError, ValueError, OverflowError):
+                return 6
         if key == "relationship_stage_policy":
             return relationship_stage_policy_json(value)
         if key == "relationship_positive_stage_cap_key":

@@ -323,7 +323,7 @@ async function savePersona() {
   if (!formValid.value) {
     return;
   }
-  for (let index = 0; index < personaForm.begin_dialogs.length; index += 1) {
+  for (let index = 0; index < personaForm.begin_dialogs.length; index += 2) {
     if (!personaForm.begin_dialogs[index]?.trim()) {
       const dialogType =
         index % 2 === 0 ? tm("form.userMessage") : tm("form.assistantMessage");
@@ -398,6 +398,10 @@ function removeDialog(index) {
 }
 
 function getDialogRules(index) {
+  // 空助手示例表示不接话，只有用户消息需要非空校验。
+  if (index % 2 === 1) {
+    return [];
+  }
   const dialogType =
     index % 2 === 0 ? tm("form.userMessage") : tm("form.assistantMessage");
   return [

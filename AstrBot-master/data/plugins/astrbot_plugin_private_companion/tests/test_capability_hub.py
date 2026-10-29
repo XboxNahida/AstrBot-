@@ -553,7 +553,7 @@ class CapabilityGuidanceInjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(event.is_wake)
         self.assertFalse(event.is_at_or_wake_command)
 
-    async def test_related_group_topic_can_continue_without_explicit_wakeup(self) -> None:
+    async def test_related_group_topic_without_hub_does_not_wake_from_history(self) -> None:
         plugin = SimpleNamespace(
             _event_scope_key=lambda _event: "group:g1",
             _extract_group_id_from_event=lambda _event: "g1",
@@ -596,9 +596,9 @@ class CapabilityGuidanceInjectionTests(unittest.IsolatedAsyncioTestCase):
 
         await append_capability_guidance(plugin, event, None)
 
-        self.assertTrue(event._private_companion_capability_decision.reply)
+        self.assertFalse(event._private_companion_capability_decision.reply)
 
-    async def test_related_group_topic_uses_structured_bot_target_in_history(self) -> None:
+    async def test_history_bot_target_does_not_wake_when_hub_is_unavailable(self) -> None:
         plugin = SimpleNamespace(
             _event_scope_key=lambda _event: "group:g1",
             _extract_group_id_from_event=lambda _event: "g1",
@@ -632,7 +632,7 @@ class CapabilityGuidanceInjectionTests(unittest.IsolatedAsyncioTestCase):
 
         await append_capability_guidance(plugin, event, None)
 
-        self.assertTrue(event._private_companion_capability_decision.reply)
+        self.assertFalse(event._private_companion_capability_decision.reply)
 
     def test_short_followup_inherits_recent_explicit_emoji_request(self) -> None:
         now = datetime.now(timezone.utc)

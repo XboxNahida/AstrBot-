@@ -4826,6 +4826,49 @@
     "default": "{}",
     "invisible": true
   },
+  "hub_optimization_config": {
+    "description": "中枢Token优化",
+    "type": "object",
+    "hint": "四项可独立关闭以对比原链路；仅优化中枢观察和判断，完整人格、聊天上下文、任务执行及每日不限额设置保持不变。",
+    "items": {
+      "enable_hub_group_batching": {
+        "description": "普通群消息合批判断",
+        "type": "bool",
+        "default": true,
+        "hint": "固定短窗口共用一次中枢请求，各消息保留独立判定。按机器人和群隔离，明确唤醒、媒体、任务控制及在途任务绕过等待。"
+      },
+      "hub_group_batch_seconds": {
+        "description": "中枢合批窗口（秒）",
+        "type": "float",
+        "default": 2.5,
+        "hint": "范围0至5秒，建议2至3秒。截止时间从首条消息起算，不因新消息无限延长；0表示不额外等待。"
+      },
+      "enable_hub_context_compaction": {
+        "description": "精简中枢上下文",
+        "type": "bool",
+        "default": true,
+        "hint": "裁剪中枢近期观察和重复待回复信息，保留当前完整消息、身份、任务保护及机器人协作证据；不删除聊天记录。"
+      },
+      "hub_recent_message_limit": {
+        "description": "中枢近期消息条数",
+        "type": "int",
+        "default": 6,
+        "hint": "范围2至12条，默认6。关闭精简开关恢复原12条；机器人协作证据继续保留完整观察窗口。"
+      },
+      "enable_hub_persona_summary": {
+        "description": "中枢使用人格决策摘要",
+        "type": "bool",
+        "default": true,
+        "hint": "本地提取不超过500字的身份、性格、情绪和边界摘录，修改人格后自动失效更新，不额外调用模型；聊天模型继续使用完整人格。"
+      },
+      "enable_hub_decision_reuse": {
+        "description": "复用未变化的中枢判定",
+        "type": "bool",
+        "default": true,
+        "hint": "仅在同一事件内短期复用相同语义输入。消息、队列、身份、人格、任务状态或相关配置改变时重新判断；关闭后恢复原事件缓存行为。"
+      }
+    }
+  },
   "model_assignment_config": {
     "description": "模型分流",
     "type": "object",

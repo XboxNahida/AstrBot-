@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -116,6 +116,58 @@ async def test_active_reply_reuses_current_umo_conversation():
         image_urls=[],
         conversation=conv,
     )
+
+
+@pytest.mark.asyncio
+async def test_closing_active_reply_generator_does_not_log_a_request_failure():
+    conv_mgr = SimpleNamespace(
+        get_curr_conversation_id=AsyncMock(return_value="cid-1"),
+        get_conversation=AsyncMock(return_value=SimpleNamespace(cid="cid-1")),
+    )
+    main = make_main_with_conversation_manager(conv_mgr)
+    main.context.get_config.return_value = {
+        "provider_ltm_settings": {
+            "group_icl_enable": False,
+            "active_reply": {"enable": True},
+        },
+    }
+    main.context.get_using_provider.return_value = object()
+    main.group_chat_context = SimpleNamespace(
+        need_active_reply=AsyncMock(return_value=True),
+        handle_message=AsyncMock(),
+    )
+    event = make_event()
+    generator = main.on_message(event)
+    with patch("astrbot.builtin_stars.astrbot.main.logger.error") as error:
+        await anext(generator)
+        await generator.aclose()
+    error.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_active_reply_still_logs_real_request_preparation_failure():
+    conv_mgr = SimpleNamespace(
+        get_curr_conversation_id=AsyncMock(return_value="cid-1"),
+        get_conversation=AsyncMock(return_value=SimpleNamespace(cid="cid-1")),
+    )
+    main = make_main_with_conversation_manager(conv_mgr)
+    main.context.get_config.return_value = {
+        "provider_ltm_settings": {
+            "group_icl_enable": False,
+            "active_reply": {"enable": True},
+        },
+    }
+    main.context.get_using_provider.return_value = object()
+    main.group_chat_context = SimpleNamespace(
+        need_active_reply=AsyncMock(return_value=True),
+        handle_message=AsyncMock(),
+    )
+    event = make_event()
+    event.request_llm.side_effect = RuntimeError("request preparation failed")
+    with patch("astrbot.builtin_stars.astrbot.main.logger.error") as error:
+        results = [item async for item in main.on_message(event)]
+    assert results == []
+    assert error.call_count == 2
 
 
 @pytest.mark.asyncio

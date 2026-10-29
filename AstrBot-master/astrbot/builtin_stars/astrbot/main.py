@@ -266,7 +266,7 @@ class Main(star.Star):
                         image_urls=image_urls,
                         conversation=conv,
                     )
-                except BaseException as e:
+                except Exception as e:
                     logger.error(traceback.format_exc())
                     logger.error(f"主动回复失败: {e}")
 

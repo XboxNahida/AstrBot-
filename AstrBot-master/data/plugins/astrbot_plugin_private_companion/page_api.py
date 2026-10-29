@@ -18637,6 +18637,10 @@ class PrivateCompanionPageApi(
 
     def _feature_flags(self) -> dict[str, bool]:
         keys = [
+            "enable_hub_group_batching",
+            "enable_hub_context_compaction",
+            "enable_hub_persona_summary",
+            "enable_hub_decision_reuse",
             "enable_proactive_only_mode",
             "enable_proactive_chat_integration",
             "enable_mai_style_integration",
@@ -20748,6 +20752,12 @@ class PrivateCompanionPageApi(
 
     def _runtime_settings(self) -> dict[str, Any]:
         keys = [
+            "enable_hub_group_batching",
+            "hub_group_batch_seconds",
+            "enable_hub_context_compaction",
+            "hub_recent_message_limit",
+            "enable_hub_persona_summary",
+            "enable_hub_decision_reuse",
             "bot_name",
             "page_font_family",
             "page_theme",
@@ -23732,6 +23742,10 @@ class PrivateCompanionPageApi(
 
     def _allowed_feature_keys(self) -> set[str]:
         return {
+            "enable_hub_group_batching",
+            "enable_hub_context_compaction",
+            "enable_hub_persona_summary",
+            "enable_hub_decision_reuse",
             "enable_conversation_model_routing",
             "enable_short_term_emotion",
             "enable_proactive_only_mode",

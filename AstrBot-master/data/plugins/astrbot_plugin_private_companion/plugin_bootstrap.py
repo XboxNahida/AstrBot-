@@ -523,6 +523,12 @@ def _initialize_world_and_model_config(self: Any, c: Any) -> None:
     self.conversation_task_provider_id = self._cfg_str(c, "CONVERSATION_TASK_PROVIDER_ID", "")
     self.conversation_task_fallback_provider_id = self._cfg_str(c, "CONVERSATION_TASK_FALLBACK_PROVIDER_ID", "")
     self.conversation_hub_provider_id = self._cfg_str(c, "CONVERSATION_HUB_PROVIDER_ID", "")
+    self.enable_hub_group_batching = self._cfg_bool(c, "enable_hub_group_batching", True)
+    self.hub_group_batch_seconds = min(5.0, self._cfg_float(c, "hub_group_batch_seconds", 2.5, 0.0))
+    self.enable_hub_context_compaction = self._cfg_bool(c, "enable_hub_context_compaction", True)
+    self.hub_recent_message_limit = self._cfg_int(c, "hub_recent_message_limit", 6, 2, 12)
+    self.enable_hub_persona_summary = self._cfg_bool(c, "enable_hub_persona_summary", True)
+    self.enable_hub_decision_reuse = self._cfg_bool(c, "enable_hub_decision_reuse", True)
     logger.info(
         "[PrivateCompanion] conversation routing loaded: enabled=%s short_emotion=%s chat=%s task=%s hub=%s",
         self.enable_conversation_model_routing,

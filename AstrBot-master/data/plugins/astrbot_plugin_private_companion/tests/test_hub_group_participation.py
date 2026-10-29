@@ -89,6 +89,34 @@ class HubGroupParticipationTests(unittest.IsolatedAsyncioTestCase):
         prompt = self.plugin._llm_call.await_args.args[0]
         return json.loads(prompt.split("输入数据：\n", 1)[1])
 
+    async def test_unavailable_hub_does_not_wake_ordinary_group_messages(self):
+        self.plugin._llm_call.return_value = None
+        event = self.event()
+        event.message_obj.author = {"bot": False}
+        await append_capability_guidance(self.plugin, event, None)
+        self.assertEqual("hub_unavailable", event._private_companion_capability_decision.reason)
+        self.assertFalse(event._private_companion_capability_decision.reply)
+        self.assertFalse(getattr(event, "private_companion_central_reply_authorized", False))
+
+    async def test_unavailable_hub_keeps_explicit_and_private_failure_paths(self):
+        self.plugin._llm_call.return_value = None
+        for private, trigger in ((True, "group_message"), (False, "at_bot"), (False, "reply_bot")):
+            with self.subTest(private=private, trigger=trigger):
+                event = self.event(private)
+                event.private_companion_group_scene["trigger"] = trigger
+                await append_capability_guidance(self.plugin, event, None)
+                self.assertTrue(event._private_companion_capability_decision.reply)
+
+    async def test_unavailable_hub_does_not_answer_bot_mentions_or_other_targets(self):
+        self.plugin._llm_call.return_value = None
+        for bot, trigger in ((True, "at_bot"), (False, "at_other")):
+            with self.subTest(bot=bot, trigger=trigger):
+                event = self.event()
+                event.message_obj.author = {"bot": bot}
+                event.private_companion_group_scene["trigger"] = trigger
+                await append_capability_guidance(self.plugin, event, None)
+                self.assertFalse(event._private_companion_capability_decision.reply)
+
     async def test_hub_receives_confirmed_history_and_density_without_candidates(self):
         original = deepcopy(self.group)
         data = await self.payload()
@@ -471,12 +499,12 @@ class HubGroupParticipationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("unknown", data["platform_scene"]["sender_identity"]["kind"])
 
-    async def test_hub_failure_is_quiet_for_bots_and_preserves_human_fallback(self):
+    async def test_hub_failure_is_quiet_for_ordinary_messages_of_all_sender_kinds(self):
         self.plugin._llm_call.side_effect = TimeoutError
         cases = (
             (True, "群友", None, False),
-            (False, "晚柠", {"name": "小七", "other_persona_names": ["晚柠"]}, True),
-            (None, "群友", None, True),
+            (False, "晚柠", {"name": "小七", "other_persona_names": ["晚柠"]}, False),
+            (None, "群友", None, False),
             (None, "晚柠", {"name": "小七", "other_persona_names": ["晚柠"]}, False),
         )
         for flag, name, identity, expected_reply in cases:

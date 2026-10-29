@@ -15775,9 +15775,70 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         await append_capability_guidance(self, event, None)
 
+    @_ON_WAITING_LLM_REQUEST(priority=100000)
+    @_multi_persona_event_context
+    async def guard_pending_message_debounce(
+        self, event: AstrMessageEvent, *args, **kwargs
+    ):
+        """Register an event before it waits for the session lock.
+
+        Args:
+            event: Inbound event with a resolved companion decision.
+        """
+        # Register lifecycle hooks on the loaded plugin, not its mixin module.
+        return await EventDispatchMixin.guard_pending_message_debounce(
+            self, event, *args, **kwargs
+        )
+
+    @filter.on_llm_request(priority=300000)
+    @_multi_persona_event_context
+    async def guard_superseded_hub_request(
+        self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs
+    ):
+        """Reject obsolete requests before preparing model input.
+
+        Args:
+            event: Event holding the session lock.
+            req: Request prepared by the core.
+        """
+        return await EventDispatchMixin.guard_superseded_hub_request(
+            self, event, req, *args, **kwargs
+        )
+
+    @filter.on_llm_response(priority=100000)
+    @_multi_persona_event_context
+    async def settle_pending_message_debounce(
+        self, event: AstrMessageEvent, resp: LLMResponse, *args, **kwargs
+    ):
+        """Guard a generated reply until the platform sends it.
+
+        Args:
+            event: Event whose model request finished.
+            resp: Generated response, if available.
+        """
+        return await EventDispatchMixin.settle_pending_message_debounce(
+            self, event, resp, *args, **kwargs
+        )
+
+    @filter.after_message_sent(priority=11000)
+    @_multi_persona_event_context
+    async def confirm_pending_message_debounce_after_send(
+        self, event: AstrMessageEvent, *args, **kwargs
+    ):
+        """Release the pending event after the platform send attempt.
+
+        Args:
+            event: Event whose response reached the send stage.
+        """
+        return await EventDispatchMixin.confirm_pending_message_debounce_after_send(
+            self, event, *args, **kwargs
+        )
+
     @filter.on_llm_request()
     @_multi_persona_event_context
-    async def inject_humanized_state(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
+    async def inject_humanized_state(
+        self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs
+    ):
         return await run_humanized_state_injection(self, event, req, *args, **kwargs)
 
     @filter.on_llm_request(priority=-300000)
@@ -15806,6 +15867,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if callable(queue_guard) and await queue_guard(event, req):
                 return
             configure_conversation_request(self, event, req)
+            notices = getattr(self, "_conversation_route_failure_notices", {})
+            notices.pop(str(getattr(event, "unified_msg_origin", "") or ""), None)
             if getattr(event, "_private_companion_hub_pending_marked", False):
                 self._message_debounce_mark_llm_pending(event)
             if getattr(event, "_private_companion_task_id", ""):
@@ -15828,7 +15891,31 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 else "聊天模型配置暂时不可用，请检查模型分工设置。"
             )
             event.stop_event()
-            await event.send(event.plain_result(text))
+            scope = str(getattr(event, "unified_msg_origin", "") or "")
+            if not scope:
+                return
+            notices = getattr(self, "_conversation_route_failure_notices", None)
+            if not isinstance(notices, dict):
+                notices = {}
+                self._conversation_route_failure_notices = notices
+            now = time.monotonic()
+            previous = notices.get(scope)
+            if previous and previous[0] == text and now - previous[1] < 300:
+                return
+            # Reserve before awaiting delivery so concurrent failures cannot spam.
+            reservation = (text, now)
+            notices.pop(scope, None)
+            notices[scope] = reservation
+            while len(notices) > 256:
+                notices.pop(next(iter(notices)))
+            try:
+                delivered = await event.send(event.plain_result(text))
+                if delivered is False and notices.get(scope) == reservation:
+                    notices.pop(scope, None)
+            except BaseException:
+                if notices.get(scope) == reservation:
+                    notices.pop(scope, None)
+                raise
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=-300000)
     @_multi_persona_event_context

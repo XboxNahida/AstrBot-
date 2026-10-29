@@ -8,6 +8,11 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
+from .hub_optimizations import (
+    call_hub_model,
+    compact_hub_payload,
+    summarize_hub_persona,
+)
 from .reaction_expression import reaction_expression_explicit_request
 from .short_term_emotion import EVENT_KINDS, PHASES
 
@@ -269,6 +274,8 @@ async def judge_capabilities(
                 payload["background_task"]["elapsed_seconds"] = max(0.0, context.now.timestamp() - payload["background_task"]["started_at"])
         except Exception:
             payload["background_task"] = {}
+    if context.conversation_type == "group" and bool(getattr(plugin, "enable_hub_context_compaction", False)):
+        payload = compact_hub_payload(payload, int(getattr(plugin, "hub_recent_message_limit", 6)))
     prompt = (
         "你是聊天机器人的语境中枢。根据当前消息、时间间隔、发送者和完整近期聊天流，"
         "直接决定是否回复、是否调用工具、给出内容方向候选以及是否应合并同话题的连续轰炸消息。\n"
@@ -326,6 +333,18 @@ async def judge_capabilities(
         or getattr(plugin, "enable_conversation_model_routing", False)
     )
     if extended:
+        hub_persona = str(persona_prompt or "")[:16000]
+        if bool(getattr(plugin, "enable_hub_persona_summary", False)):
+            cache_key = str(persona_prompt or "")
+            cache = getattr(plugin, "_hub_persona_summary_cache", None)
+            if not isinstance(cache, dict):
+                cache = {}
+                plugin._hub_persona_summary_cache = cache
+            if cache_key not in cache:
+                cache[cache_key] = summarize_hub_persona(cache_key)
+                while len(cache) > 16:
+                    cache.pop(next(iter(cache)))
+            hub_persona = cache[cache_key]
         prompt += (
             "\n额外输出 route，仅允许 chat/task/mixed。日常陪聊、斗嘴、情感交流选 chat；"
             "复杂计算、编程、研究分析、需要工具实际执行的工作选 task；两者并存选 mixed。"
@@ -342,15 +361,19 @@ async def judge_capabilities(
             "普通反对意见属于 disagree，不能直接算 provoke；善意挑逗的害羞和真正冒犯分开；"
             "群友互相说话不算针对 Bot。阶段根据近期实际对话判断，可以停留、跳过或恢复，"
             "不要每轮强制完整走嘴硬/破防/找补流程。情绪是状态事实，不是新的风格指令。\n"
-            + json.dumps({"current_persona": str(persona_prompt or "")[:16000],
+            + json.dumps({"current_persona": hub_persona,
                           "prior_short_emotion": dict(short_term_state or {})}, ensure_ascii=False)
         )
     try:
-        raw = await llm_call(
-            prompt,
+        raw = await call_hub_model(
+            plugin,
+            context=context,
+            scene=dict(scene or {}),
+            payload=payload,
+            prompt=prompt,
             max_tokens=600 if extended else 260,
             provider_id=provider_id,
-            task="astrbot_reply",
+            persona_revision=str(persona_prompt or ""),
         )
     except Exception:
         return None
