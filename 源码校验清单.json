@@ -5549,7 +5549,7 @@
   },
   {
     "路径": "AstrBot-master/data/data_v4.db",
-    "SHA256": "4a557d7e823e30b9a33d3dd395a80ee595eba91e5d81e5ffc991c27e0113d867"
+    "SHA256": "339411631b10e9157d2efaa4694262c916528c4171a08bcf427d630e953789e6"
   },
   {
     "路径": "AstrBot-master/data/mcp_server.json",
@@ -12713,15 +12713,15 @@
   },
   {
     "路径": "人格/personas.json",
-    "SHA256": "c9edd821f7bb87e3fd19f778172ffa5d54e3c60ea7139674bf512d8beabbfc2a"
+    "SHA256": "fec627d009182a5edda1ba0094b979e3732a86c12ce5ff7a945c010cea2de2a9"
   },
   {
     "路径": "人格/小七.md",
-    "SHA256": "35fde1e46eef4901def044cf0889e3b38e092b559a6f8aa8885b4a3114ec00cf"
+    "SHA256": "da796178491858a0271fa986ee3fcc07d08f834a4a2da5acbb896557a59b1a91"
   },
   {
     "路径": "人格/晚柠.md",
-    "SHA256": "04381ec416659806e7d8452776316b9f668ea2bd34b559ab81e23327b5ca9ba6"
+    "SHA256": "c6635644a464df93d04142312879d89239f2d68756ac615b3af5aaeb264a448b"
   },
   {
     "路径": "初始化环境.ps1",
@@ -12781,7 +12781,7 @@
   },
   {
     "路径": "发布预设/data/data_v4.db",
-    "SHA256": "4a557d7e823e30b9a33d3dd395a80ee595eba91e5d81e5ffc991c27e0113d867"
+    "SHA256": "339411631b10e9157d2efaa4694262c916528c4171a08bcf427d630e953789e6"
   },
   {
     "路径": "发布预设/data/mcp_server.json",
