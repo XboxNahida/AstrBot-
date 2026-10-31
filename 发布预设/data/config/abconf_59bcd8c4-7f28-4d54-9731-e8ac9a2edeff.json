@@ -461,7 +461,7 @@
   },
   "provider_tts_settings": {
     "enable": true,
-    "provider_id": "mimo_tts",
+    "provider_id": "mimo_tts_wanning",
     "dual_output": false,
     "use_file_service": false,
     "trigger_probability": 1.0

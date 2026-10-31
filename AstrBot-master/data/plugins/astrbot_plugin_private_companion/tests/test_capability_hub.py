@@ -12,6 +12,7 @@ from astrbot_plugin_private_companion.capability_hub import (
     capability_allowed,
     decision_action_allowed,
     decide_capabilities,
+    explicit_singing_request,
     format_capability_guidance,
     judge_capabilities,
     parse_model_capability_decision,
@@ -171,6 +172,70 @@ class CapabilityHubTests(unittest.TestCase):
         self.assertTrue(decision.reply)
         self.assertEqual((), decision.actions)
         self.assertTrue(context.has_current_voice)
+
+    def test_explicit_singing_request_selects_voice_and_not_music(self) -> None:
+        decision = decide_capabilities(
+            self._context("唱首歌给我听"),
+            available_capabilities={"voice", "music"},
+        )
+
+        self.assertEqual(("voice",), decision.actions)
+        self.assertEqual("explicit_singing_request", decision.reason)
+
+    def test_bare_singing_request_selects_voice(self) -> None:
+        decision = decide_capabilities(
+            self._context("唱"),
+            available_capabilities={"voice", "music"},
+        )
+
+        self.assertEqual(("voice",), decision.actions)
+
+    def test_singing_retry_phrases_keep_the_singing_intent(self) -> None:
+        for text in ("重新唱一下", "再唱一遍", "刚刚没唱出来，再来一次"):
+            with self.subTest(text=text):
+                self.assertTrue(explicit_singing_request(text))
+                decision = decide_capabilities(
+                    self._context(text),
+                    available_capabilities={"voice", "music"},
+                )
+                self.assertEqual(("voice",), decision.actions)
+                self.assertEqual("explicit_singing_request", decision.reason)
+
+    def test_music_playback_request_selects_music_and_not_voice(self) -> None:
+        for text in ("来一首歌", "放首歌", "播放音乐", "听歌"):
+            with self.subTest(text=text):
+                decision = decide_capabilities(
+                    self._context(text),
+                    available_capabilities={"voice", "music"},
+                )
+
+                self.assertEqual(("music",), decision.actions)
+                self.assertEqual("music_playback_request", decision.reason)
+
+    def test_song_mention_and_non_singing_terms_do_not_trigger_media_actions(self) -> None:
+        for text in ("我喜欢这首歌", "唱片推荐一下", "这个唱腔很特别", "别跟我唱反调"):
+            with self.subTest(text=text):
+                decision = decide_capabilities(
+                    self._context(text),
+                    available_capabilities={"voice", "music"},
+                )
+
+                self.assertEqual((), decision.actions)
+
+    def test_model_cannot_cross_route_explicit_media_intent(self) -> None:
+        singing = parse_model_capability_decision(
+            '{"reply":true,"actions":["music"],"tone":"自然"}',
+            available_capabilities={"voice", "music"},
+            context=self._context("唱首歌给我听"),
+        )
+        playback = parse_model_capability_decision(
+            '{"reply":true,"actions":["voice"],"tone":"自然"}',
+            available_capabilities={"voice", "music"},
+            context=self._context("来一首歌"),
+        )
+
+        self.assertEqual(("voice",), singing.actions)
+        self.assertEqual(("music",), playback.actions)
 
     def test_decision_merges_cross_sender_burst_only_after_pending_reply(self) -> None:
         decision = decide_capabilities(
@@ -855,7 +920,9 @@ class CapabilityGuidanceInjectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_search_tools_follow_hub_decision(self) -> None:
         class Tools:
             def __init__(self) -> None:
-                self.tools = [SimpleNamespace(name=name) for name in ("web_search_tavily", "AIsearch", "safe_tool")]
+                self.tools = [SimpleNamespace(name=name) for name in (
+                    "web_search_tavily", "AIsearch", "find_music", "deliver_music", "safe_tool"
+                )]
 
             def remove_tool(self, name: str) -> None:
                 self.tools = [tool for tool in self.tools if tool.name != name]
@@ -868,7 +935,12 @@ class CapabilityGuidanceInjectionTests(unittest.IsolatedAsyncioTestCase):
         approved = SimpleNamespace(func_tool=Tools())
         approved._private_companion_capability_decision = SimpleNamespace(actions=("search",))
         gate_request_search_tools(approved)
-        self.assertEqual(3, len(approved.func_tool.tools))
+        self.assertEqual(["web_search_tavily", "AIsearch", "safe_tool"], [tool.name for tool in approved.func_tool.tools])
+
+        music_approved = SimpleNamespace(func_tool=Tools())
+        music_approved._private_companion_capability_decision = SimpleNamespace(actions=("music",))
+        gate_request_search_tools(music_approved)
+        self.assertEqual(["find_music", "deliver_music", "safe_tool"], [tool.name for tool in music_approved.func_tool.tools])
 
     async def test_injects_same_group_recent_messages_and_image_summary(self) -> None:
         previous_ts = datetime.now(timezone.utc).timestamp() - 30

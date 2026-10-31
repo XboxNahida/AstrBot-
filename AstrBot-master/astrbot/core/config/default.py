@@ -2689,7 +2689,8 @@ CONFIG_METADATA_2 = {
                     "mimo-tts-voice": {
                         "description": "音色",
                         "type": "string",
-                        "hint": "MiMo TTS 的音色名称。可选值包括 'mimo_default'、'default_en'、'default_zh'。",
+                        "options": ["冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean"],
+                        "hint": "MiMo 官方预置音色：中文冰糖、茉莉、苏打、白桦，英文 Mia、Chloe、Milo、Dean；旧版自定义值仍可保留。",
                     },
                     "mimo-tts-format": {
                         "description": "输出格式",
@@ -2699,12 +2700,12 @@ CONFIG_METADATA_2 = {
                     "mimo-tts-style-prompt": {
                         "description": "风格提示词",
                         "type": "string",
-                        "hint": "会以 <style>...</style> 标签形式添加到待合成文本开头，用于控制语速、情绪、角色或风格，例如 开心、变快、孙悟空、悄悄话。可留空。",
+                        "hint": "作为独立的自然语言指令控制语气、情绪和语速，例如自然俏皮、语速适中；不会拼接进朗读正文。每个机器人选择独立的 TTS Provider 即可分别保存。",
                     },
                     "mimo-tts-dialect": {
                         "description": "方言",
                         "type": "string",
-                        "hint": "会与风格提示词一起写入开头的 <style>...</style> 标签中，例如 东北话、四川话、河南话、粤语。可留空。",
+                        "hint": "作为独立的自然语言指令传给 MiMo，例如东北话、四川话、河南话、粤语。可留空。",
                     },
                     "mimo-tts-seed-text": {
                         "description": "种子文本",

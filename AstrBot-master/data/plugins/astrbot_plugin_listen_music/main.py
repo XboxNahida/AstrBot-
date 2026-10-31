@@ -292,7 +292,7 @@ def _music_request_parameters() -> dict[str, Any]:
         "properties": {
             "title": {
                 "type": "string",
-                "description": "具体歌曲名；“唱首歌”时必须先选定一首具体歌曲。",
+                "description": "具体歌曲名；仅在用户要求播放或搜索歌曲时填写。用户要求唱歌时不要调用音乐工具。",
             },
             "artist": {
                 "type": "string",
@@ -321,7 +321,8 @@ class FindMusicTool(FunctionTool):
             name="find_music",
             description=(
                 "仅用于直接听歌前的隐藏检索。传入整理后的具体歌名、歌手和版本偏好；"
-                "“唱首歌”时先选定一首再调用。本工具返回当前会话的候选给你判断，"
+                "仅用于来一首、放首歌、播放音乐、听歌等请求；用户说唱歌、唱首歌或唱给我听时不要调用。"
+                "本工具返回当前会话的候选给你判断，"
                 "不向用户发送候选，也不发送音乐。成功后必须仅从返回的 search_id 和 position 中选择，"
                 "候选评估时，歌名精确或完整匹配优先；用户给出歌手时，以候选标题、搜索标题或分P标题中的歌手线索佐证。"
                 "必须遵守用户明确的版本偏好；未指定版本时，优先普通完整录音，但 Live、翻唱、AI、Remix、DJ、伴奏和 MV 等标签"

@@ -3353,6 +3353,22 @@ input[type="search"] {
   flex: 0 0 auto;
 }
 
+.tts-provider-preview > p,
+.tts-provider-preview > span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.tts-provider-preview > button {
+  margin: 10px 8px 10px 0;
+}
+
+.tts-provider-preview audio {
+  display: block;
+  width: 100%;
+  margin: 8px 0 16px;
+}
+
 .tts-provider-editor-actions {
   display: flex;
   align-items: center;

@@ -650,6 +650,29 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("negative", signal)
 
+    def test_singing_request_is_positive_but_non_singing_term_is_not(self):
+        harness = _TtsHarness()
+
+        signal, matched, _raw = harness._event_tts_request_signal(
+            SimpleNamespace(message_str="唱首歌给我听")
+        )
+        self.assertEqual("positive", signal)
+        self.assertEqual("singing_request", matched)
+
+        signal, _matched, _raw = harness._event_tts_request_signal(
+            SimpleNamespace(message_str="唱腔推荐一下")
+        )
+        self.assertNotEqual("positive", signal)
+
+    def test_singing_rule_requires_mimo_singing_tag(self):
+        harness = _TtsHarness()
+        rule = harness._build_tts_rule_prompt(
+            event=SimpleNamespace(_private_companion_singing_requested=True)
+        )
+
+        self.assertIn("(唱歌)", rule)
+        self.assertIn("完整歌词", rule)
+
     def test_tts_component_metadata_survives_pydantic_components(self):
         harness = _TtsHarness()
         visible = harness._mark_tts_visible_plain("完整中文正文")
@@ -1290,6 +1313,49 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source, call.kwargs["fallback_plain"])
         self.assertEqual("processed", result[0].text)
 
+    async def test_full_fast_tag_singing_request_adds_official_singing_prefix(self):
+        harness = _TtsHarness()
+        harness.tts_generation_mode = "fast_tag"
+        harness.tts_conversion_scope = "full"
+        harness.tts_frequency_control_mode = "legacy"
+        harness.tts_voice_language = "zh"
+        harness.tts_delivery_mode = "voice_and_text"
+        harness.tts_foreign_text_mode = "translation"
+        harness._tts_auto_voice_last_at = {}
+        harness._process_tts_tags = AsyncMock(return_value=[Plain("processed")])
+        event = SimpleNamespace(
+            unified_msg_origin="test-session",
+            message_str="唱首歌给我听",
+            _private_companion_singing_requested=True,
+        )
+
+        result = await harness._maybe_convert_plain_reply_to_tts("春风吹过山岗。", event)
+
+        call = harness._process_tts_tags.await_args
+        self.assertEqual("<tts>(唱歌)春风吹过山岗。</tts>", call.args[0])
+        self.assertEqual("processed", result[0].text)
+
+    async def test_singing_retry_phrase_adds_official_singing_prefix_without_event_marker(self):
+        harness = _TtsHarness()
+        harness.tts_generation_mode = "fast_tag"
+        harness.tts_conversion_scope = "full"
+        harness.tts_frequency_control_mode = "legacy"
+        harness.tts_voice_language = "zh"
+        harness.tts_delivery_mode = "voice_and_text"
+        harness.tts_foreign_text_mode = "translation"
+        harness._tts_auto_voice_last_at = {}
+        harness._process_tts_tags = AsyncMock(return_value=[Plain("processed")])
+        event = SimpleNamespace(
+            unified_msg_origin="test-session",
+            message_str="刚刚后端出错了，你重新唱一下",
+        )
+
+        result = await harness._maybe_convert_plain_reply_to_tts("春风吹过山岗。", event)
+
+        call = harness._process_tts_tags.await_args
+        self.assertEqual("<tts>(唱歌)春风吹过山岗。</tts>", call.args[0])
+        self.assertEqual("processed", result[0].text)
+
     async def test_voice_only_partial_scope_preserves_unspoken_text(self):
         harness = _TtsHarness()
         harness.tts_delivery_mode = "voice_only"
@@ -1648,6 +1714,41 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
         call = harness._process_tts_tags.await_args
         self.assertEqual("<tts>好温暖。后面的正文也要朗读。</tts>", call.args[0])
         self.assertEqual("好温暖。后面的正文也要朗读。", call.kwargs["fallback_plain"])
+        self.assertEqual("processed", event.result.chain[0].text)
+
+    async def test_fast_tag_send_path_preserves_singing_tag_when_enforcing_full_scope(self):
+        harness = _TtsHarness()
+        harness.enabled = True
+        harness.tts_generation_mode = "fast_tag"
+        harness.tts_conversion_scope = "full"
+        harness.tts_voice_language = "zh"
+        harness.tts_delivery_mode = "voice_only"
+        harness._process_tts_tags = AsyncMock(return_value=[Plain("processed")])
+        harness._build_result_from_chain = lambda chain: SimpleNamespace(chain=chain)
+        result = SimpleNamespace(
+            chain=[Plain("<tts>春风吹过山岗。</tts>先前导语，后面的歌词也要朗读。")]
+        )
+
+        class Event:
+            unified_msg_origin = "test-session"
+            _private_companion_tts_request_applied = True
+            _private_companion_singing_requested = True
+
+            def get_result(self):
+                return result
+
+            def set_result(self, value):
+                self.result = value
+
+        event = Event()
+        await harness.apply_tts_enhancement_before_send(event)
+
+        call = harness._process_tts_tags.await_args
+        self.assertEqual(
+            "<tts>(唱歌)春风吹过山岗。先前导语，后面的歌词也要朗读。</tts>",
+            call.args[0],
+        )
+        self.assertEqual("春风吹过山岗。先前导语，后面的歌词也要朗读。", call.kwargs["fallback_plain"])
         self.assertEqual("processed", event.result.chain[0].text)
 
     def test_windows_playback_passes_path_and_volume_through_environment(self):

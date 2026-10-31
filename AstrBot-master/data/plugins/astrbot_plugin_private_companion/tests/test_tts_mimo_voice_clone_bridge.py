@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from astrbot.api.message_components import Plain, Record
+from astrbot.core.provider.sources.mimo_tts_api_source import ProviderMiMoTTSAPI
 from astrbot_plugin_private_companion.proactive_engine import ProactiveEngineMixin
 from astrbot_plugin_private_companion.tts_enhancement import TtsEnhancementMixin
 
@@ -122,6 +123,125 @@ class MimoVoiceCloneBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("10001", plugin.calls[0][1]["user_id"])
         self.assertEqual(_Event.unified_msg_origin, plugin.calls[0][1]["group_id"])
         self.assertFalse(plugin.calls[0][1]["split"])
+
+    async def test_mimo_backend_preserves_official_singing_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin = _FakeMimoVoiceClonePlugin(root / "plugin_data" / "mimo" / "singing.wav")
+            harness = _Harness(_Context(_ToolManager(plugin), provider=None))
+            event = _Event()
+            event.message_str = "重新唱一下"
+            event._private_companion_singing_requested = True
+
+            with patch(
+                "astrbot_plugin_private_companion.tts_enhancement.get_astrbot_data_path",
+                return_value=str(root),
+            ):
+                components = await harness._process_tts_tags(
+                    "<tts>(唱歌)春风吹过山岗。</tts>",
+                    event,
+                    fallback_plain="春风吹过山岗。",
+                )
+                await asyncio.sleep(0)
+
+        self.assertTrue(any(isinstance(component, Record) for component in components))
+        self.assertEqual("(唱歌)春风吹过山岗。", plugin.calls[0][0])
+
+    def test_mimo_singing_keeps_lyrics_language(self) -> None:
+        harness = _Harness(_Context(_ToolManager(), provider=None))
+        cases = (
+            ("zh", "The stars are shining over the quiet town."),
+            ("en", "The stars are shining over the quiet town."),
+            ("zh", "星の下で君と歌おう。"),
+            ("ja", "春风吹过远方的山岗。"),
+        )
+        for voice_language, lyrics in cases:
+            with self.subTest(voice_language=voice_language, lyrics=lyrics):
+                harness.tts_voice_language = voice_language
+                self.assertFalse(
+                    harness._tts_text_needs_language_conversion(
+                        "(唱歌)" + lyrics,
+                        provider_kind="mimo_tts",
+                    )
+                )
+
+    async def test_native_mimo_sends_singing_cue_in_http_payload(self) -> None:
+        client = AsyncMock()
+        client.post.return_value = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "choices": [{"message": {"audio": {"data": "UklGRi10ZXN0"}}}]
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                patch(
+                    "astrbot.core.provider.sources.mimo_tts_api_source.create_http_client",
+                    return_value=client,
+                ),
+                patch(
+                    "astrbot.core.provider.sources.mimo_tts_api_source.read_reference",
+                    return_value=b"reference-audio",
+                ),
+                patch(
+                    "astrbot.core.provider.sources.mimo_tts_api_source.get_temp_dir",
+                    return_value=root,
+                ),
+                patch(
+                    "astrbot_plugin_private_companion.tts_enhancement.get_astrbot_data_path",
+                    return_value=str(root),
+                ),
+            ):
+                provider = ProviderMiMoTTSAPI(
+                    {
+                        "id": "test-mimo",
+                        "model": "mimo-v2.5-tts-voiceclone",
+                        "mimo-tts-reference-audio": "test-reference",
+                    },
+                    {},
+                )
+                harness = _Harness(_Context(_ToolManager(), provider=provider))
+                harness.tts_synthesis_backend = "astrbot_provider"
+                lyrics = "(唱歌)The stars are shining over the quiet town."
+                try:
+                    components = await harness._process_tts_tags(
+                        f"<tts>{lyrics}</tts>", _Event(), fallback_plain=lyrics
+                    )
+                    await asyncio.sleep(0)
+                finally:
+                    await provider.terminate()
+
+        self.assertTrue(any(isinstance(component, Record) for component in components))
+        client.post.assert_awaited_once()
+        payload = client.post.await_args.kwargs["json"]
+        self.assertEqual(lyrics, payload["messages"][-1]["content"])
+        self.assertTrue(payload["audio"]["voice"].startswith("data:audio/wav;base64,"))
+
+    def test_mimo_singing_protection_keeps_other_sanitization(self) -> None:
+        harness = _Harness(_Context(_ToolManager(), provider=None))
+        self.assertEqual(
+            "(唱歌)春风吹过山岗。",
+            harness._sanitize_tts_spoken_text(
+                "(唱歌)(微笑)[开心]春风吹过山岗。", provider_kind="mimo_tts"
+            ),
+        )
+        self.assertEqual(
+            "春风吹过山岗。",
+            harness._sanitize_tts_spoken_text(
+                "(唱歌)春风吹过山岗。", provider_kind="generic"
+            ),
+        )
+        self.assertEqual(
+            "",
+            harness._sanitize_tts_spoken_text("(唱歌)", provider_kind="mimo_tts"),
+        )
+        self.assertTrue(
+            harness._tts_text_needs_language_conversion(
+                "The stars are shining over the quiet town.",
+                provider_kind="mimo_tts",
+            )
+        )
 
     async def test_together_companion_realtime_bridge_uses_mimo_without_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

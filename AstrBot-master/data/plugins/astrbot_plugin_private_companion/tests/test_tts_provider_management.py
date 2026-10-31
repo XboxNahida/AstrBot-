@@ -30,7 +30,14 @@ class _FakeProviderManager:
         return deepcopy(config)
 
     def get_provider_config_by_id(self, provider_id: str, **_kwargs):
-        return next((deepcopy(item) for item in self.providers_config if item.get("id") == provider_id), None)
+        return next(
+            (
+                deepcopy(item)
+                for item in self.providers_config
+                if item.get("id") == provider_id
+            ),
+            None,
+        )
 
     async def create_provider(self, config: dict) -> None:
         self.created.append(deepcopy(config))
@@ -98,15 +105,73 @@ class TtsProviderManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret-api-key", repr(payload))
         self.assertNotIn("secret-proxy", repr(payload))
 
+    def test_mimo_fields_match_official_presets_and_direction_format(self) -> None:
+        template = self.api._tts_provider_schema_bundle()["by_type"]["mimo_tts_api"]
+        fields = {item["key"]: item for item in template["fields"]}
+        self.assertEqual(
+            [item["value"] for item in fields["mimo-tts-voice"]["options"]],
+            ["冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean"],
+        )
+        self.assertEqual(fields["mimo-tts-style-prompt"]["type"], "text")
+        self.assertNotIn("<style>", fields["mimo-tts-style-prompt"]["hint"])
+
     def test_empty_secret_update_keeps_existing_values(self) -> None:
         normalized = self.api._normalized_tts_provider_update(
             _fish_config(),
-            {"values": {"api_key": "", "proxy": "", "fishaudio-tts-character": "voice-b"}},
+            {
+                "values": {
+                    "api_key": "",
+                    "proxy": "",
+                    "fishaudio-tts-character": "voice-b",
+                }
+            },
             self.api._tts_provider_schema_bundle(),
         )
         self.assertEqual(normalized["api_key"], "secret-api-key")
         self.assertEqual(normalized["proxy"], "http://secret-proxy.local")
         self.assertEqual(normalized["fishaudio-tts-character"], "voice-b")
+
+    def test_mimo_singing_binding_lists_only_enabled_base_models(self) -> None:
+        self.manager.providers_config.extend([
+            {"id": "sing-base", "type": "mimo_tts_api", "provider_type": "text_to_speech", "enable": True, "model": "mimo-v2.5-tts"},
+            {"id": "sing-clone", "type": "mimo_tts_api", "provider_type": "text_to_speech", "enable": True, "model": "mimo-v2.5-tts-voiceclone"},
+            {"id": "sing-off", "type": "mimo_tts_api", "provider_type": "text_to_speech", "enable": False, "model": "mimo-v2.5-tts"},
+        ])
+        template = self.api._tts_provider_schema_bundle()["by_type"]["mimo_tts_api"]
+        fields = {item["key"]: item for item in template["fields"]}
+        self.assertIn("mimo-tts-singing-provider-id", fields)
+        binding = fields["mimo-tts-singing-provider-id"]
+        self.assertEqual(["", "sing-base"], [item["value"] for item in binding["options"]])
+        self.assertIn("不支持唱歌", fields["model"]["hint"])
+
+    async def test_mimo_singing_binding_save_preserves_speech_voice_and_secret(self) -> None:
+        speaker = {"id": "speech", "type": "mimo_tts_api", "provider_type": "text_to_speech", "enable": True, "model": "mimo-v2.5-tts-voiceclone", "api_key": "secret-mimo-key", "mimo-tts-reference-audio": "local-reference"}
+        singer = {"id": "sing-base", "type": "mimo_tts_api", "provider_type": "text_to_speech", "enable": True, "model": "mimo-v2.5-tts"}
+        self.manager.providers_config.extend([speaker, singer])
+        fake_request = SimpleNamespace(get_json=AsyncMock(return_value={"provider_id": "speech", "config": {"values": {"api_key": "", "mimo-tts-singing-provider-id": "sing-base"}}}))
+        with (
+            patch("astrbot_plugin_private_companion.page_api.request", fake_request),
+            patch("astrbot.core.provider.sources.mimo_tts_reference.read_reference"),
+        ):
+            result = await self.api.update_tts_provider_config()
+        self.assertTrue(result["success"])
+        updated = self.manager.get_provider_config_by_id("speech")
+        self.assertEqual("sing-base", updated.get("mimo-tts-singing-provider-id"))
+        self.assertEqual("mimo-v2.5-tts-voiceclone", updated["model"])
+        self.assertEqual("local-reference", updated["mimo-tts-reference-audio"])
+        self.assertEqual("secret-mimo-key", updated["api_key"])
+        self.assertEqual(singer, self.manager.get_provider_config_by_id("sing-base"))
+        self.assertNotIn("secret-mimo-key", repr(result))
+
+    def test_invalid_mimo_singing_binding_is_rejected(self) -> None:
+        current = {"id": "speech", "type": "mimo_tts_api", "provider_type": "text_to_speech", "enable": True, "model": "mimo-v2.5-tts"}
+        for model, enabled in (("mimo-v2.5-tts-voiceclone", True), ("mimo-v2.5-tts-voicedesign", True), ("mimo-v2.5-tts", False)):
+            with self.subTest(model=model, enabled=enabled):
+                self.manager.providers_config = [current, {"id": "invalid", "type": "mimo_tts_api", "provider_type": "text_to_speech", "model": model, "enable": enabled}]
+                with self.assertRaisesRegex(ValueError, "演唱"):
+                    self.api._normalized_tts_provider_update(current, {"values": {"mimo-tts-singing-provider-id": "invalid"}}, self.api._tts_provider_schema_bundle())
+        with self.assertRaisesRegex(ValueError, "演唱"):
+            self.api._normalized_tts_provider_update(current, {"values": {"mimo-tts-singing-provider-id": "missing"}}, self.api._tts_provider_schema_bundle())
 
     def test_invalid_fish_model_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "Fish Audio 模型"):
@@ -137,11 +202,17 @@ class TtsProviderManagementTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("model", normalized_without_model)
 
-    async def test_unchanged_provider_update_does_not_reload_astrbot_provider(self) -> None:
-        fake_request = SimpleNamespace(get_json=AsyncMock(return_value={
-            "provider_id": "fish-main",
-            "config": {"enable": True, "values": {}},
-        }))
+    async def test_unchanged_provider_update_does_not_reload_astrbot_provider(
+        self,
+    ) -> None:
+        fake_request = SimpleNamespace(
+            get_json=AsyncMock(
+                return_value={
+                    "provider_id": "fish-main",
+                    "config": {"enable": True, "values": {}},
+                }
+            )
+        )
 
         with patch("astrbot_plugin_private_companion.page_api.request", fake_request):
             result = await self.api.update_tts_provider_config()
@@ -159,11 +230,20 @@ class TtsProviderManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager.created[0]["id"], "edge-ja")
         self.assertFalse(self.manager.created[0]["enable"])
 
-    async def test_update_uses_astrbot_provider_manager_and_preserves_secret(self) -> None:
-        fake_request = SimpleNamespace(get_json=AsyncMock(return_value={
-            "provider_id": "fish-main",
-            "config": {"enable": True, "values": {"api_key": "", "model": "s2-pro"}},
-        }))
+    async def test_update_uses_astrbot_provider_manager_and_preserves_secret(
+        self,
+    ) -> None:
+        fake_request = SimpleNamespace(
+            get_json=AsyncMock(
+                return_value={
+                    "provider_id": "fish-main",
+                    "config": {
+                        "enable": True,
+                        "values": {"api_key": "", "model": "s2-pro"},
+                    },
+                }
+            )
+        )
         with patch("astrbot_plugin_private_companion.page_api.request", fake_request):
             result = await self.api.update_tts_provider_config()
         self.assertTrue(result["success"])
@@ -172,14 +252,18 @@ class TtsProviderManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated["model"], "s2-pro")
 
     async def test_language_clone_preserves_source_and_secrets(self) -> None:
-        fake_request = SimpleNamespace(get_json=AsyncMock(return_value={
-            "source_provider_id": "fish-main",
-            "language": "ja",
-            "config": {
-                "enable": True,
-                "values": {"api_key": "", "proxy": "", "model": "s2.1-pro"},
-            },
-        }))
+        fake_request = SimpleNamespace(
+            get_json=AsyncMock(
+                return_value={
+                    "source_provider_id": "fish-main",
+                    "language": "ja",
+                    "config": {
+                        "enable": True,
+                        "values": {"api_key": "", "proxy": "", "model": "s2.1-pro"},
+                    },
+                }
+            )
+        )
         with patch("astrbot_plugin_private_companion.page_api.request", fake_request):
             result = await self.api.clone_tts_provider_config()
         self.assertTrue(result["success"])
@@ -202,10 +286,31 @@ class TtsProviderManagementTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(clone_id, "fish-main-ja-2")
 
+    async def test_create_singing_provider_inherits_connection_and_binds_speaker(self) -> None:
+        speaker = {"id": "speech", "type": "mimo_tts_api", "provider_type": "text_to_speech", "enable": True, "model": "mimo-v2.5-tts-voiceclone", "api_key": "secret-mimo-key", "mimo-tts-reference-audio": "local-reference", "mimo-tts-voice": "冰糖", "mimo-tts-style-prompt": "讲话风格", "mimo-tts-seed-text": "讲话种子"}
+        self.manager.providers_config.append(deepcopy(speaker))
+        fake_request = SimpleNamespace(get_json=AsyncMock(return_value={"source_provider_id": "speech", "purpose": "singing"}))
+        with patch("astrbot_plugin_private_companion.page_api.request", fake_request):
+            result = await self.api.clone_tts_provider_config()
+        self.assertTrue(result["success"], result)
+        singer = self.manager.get_provider_config_by_id(result["data"]["provider_id"])
+        self.assertEqual("speech-singing", singer["id"])
+        self.assertEqual("mimo-v2.5-tts", singer["model"])
+        self.assertEqual("冰糖", singer["mimo-tts-voice"])
+        self.assertEqual("secret-mimo-key", singer["api_key"])
+        self.assertEqual("", singer["mimo-tts-reference-audio"])
+        self.assertEqual("", singer["mimo-tts-style-prompt"])
+        self.assertEqual("", singer["mimo-tts-seed-text"])
+        expected_speaker = {**speaker, "mimo-tts-singing-provider-id": singer["id"]}
+        self.assertEqual(expected_speaker, self.manager.get_provider_config_by_id("speech"))
+        self.assertNotIn("secret-mimo-key", repr(result))
+
     async def test_disabled_provider_test_returns_clear_status(self) -> None:
         self.manager.providers_config = [_fish_config(enable=False)]
         self.manager.inst_map = {}
-        fake_request = SimpleNamespace(get_json=AsyncMock(return_value={"provider_id": "fish-main"}))
+        fake_request = SimpleNamespace(
+            get_json=AsyncMock(return_value={"provider_id": "fish-main"})
+        )
         with patch("astrbot_plugin_private_companion.page_api.request", fake_request):
             result = await self.api.test_tts_provider_config()
         self.assertTrue(result["success"])

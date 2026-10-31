@@ -882,6 +882,8 @@ class PrivateCompanionPageApi(
             ("/tts/provider/clone", self.clone_tts_provider_config, ["POST"], "Private Companion Page clone TTS provider"),
             ("/tts/provider/update", self.update_tts_provider_config, ["POST"], "Private Companion Page update TTS provider"),
             ("/tts/provider/test", self.test_tts_provider_config, ["POST"], "Private Companion Page test TTS provider"),
+            ("/tts/provider/preview", self.preview_tts_provider_config, ["POST"], "Private Companion Page preview unsaved TTS settings"),
+            ("/tts/reference/upload", self.upload_tts_reference_audio, ["POST"], "Private Companion Page upload local TTS reference"),
         ]
         persona_control_routes = {
             "/extension-migration-notice",
@@ -20025,6 +20027,7 @@ class PrivateCompanionPageApi(
                 "role",
                 "format",
                 "dialect",
+                "singing",
                 "speed",
                 "pitch",
                 "volume",
@@ -20070,6 +20073,7 @@ class PrivateCompanionPageApi(
             "mimo-tts-style-prompt": "风格提示词",
             "mimo-tts-dialect": "方言",
             "mimo-tts-seed-text": "种子文本",
+            "mimo-tts-singing-provider-id": "唱歌专用 Provider",
             "edge-tts-voice": "音色",
             "rate": "语速",
             "volume": "音量",
@@ -20105,6 +20109,10 @@ class PrivateCompanionPageApi(
             "api_base": "服务接口地址，使用官方服务时通常保持默认。",
             "proxy": "可选代理地址，支持 HTTP、HTTPS 或 SOCKS5；留空保存会保留现有值。",
             "timeout": "单次语音合成请求的超时时间。",
+            "mimo-tts-voice": "官方预置音色：冰糖、茉莉、苏打、白桦、Mia、Chloe、Milo、Dean；已有自定义值仍可保留。",
+            "mimo-tts-style-prompt": "独立的声音风格指令，例如自然俏皮、语速适中；不会作为正文朗读。不同机器人请选择不同的 TTS Provider。",
+            "mimo-tts-dialect": "声音使用的方言，例如四川话、粤语；作为独立指令传入，不拼接到朗读正文。",
+            "mimo-tts-singing-provider-id": "仅在用户明确要求唱歌时使用；普通说话继续当前声线。请选择已启用的基础 MiMo TTS，并到该 Provider 单独调整唱歌音色。克隆/声音设计未配置演唱通道时回退文字。",
         }
         return hints.get(str(key or ""), "")
 
@@ -20151,12 +20159,45 @@ class PrivateCompanionPageApi(
                 continue
             if provider_type == "fishaudio_tts_api":
                 defaults.setdefault("model", "s2.1-pro-free")
+            if provider_type == "mimo_tts_api":
+                defaults.setdefault("mimo-tts-reference-audio", "")
+                defaults.setdefault("mimo-tts-singing-provider-id", "")
 
             fields: list[dict[str, Any]] = []
             for key, default in defaults.items():
                 if key in TTS_PROVIDER_SYSTEM_KEYS:
                     continue
                 metadata = deepcopy(field_metadata.get(key, {}) or {})
+                if provider_type == "mimo_tts_api":
+                    hint = self._tts_provider_fallback_hint(key)
+                    if hint:
+                        metadata["hint"] = hint
+                    if key == "mimo-tts-voice":
+                        metadata["options"] = ["冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean"]
+                    elif key == "mimo-tts-style-prompt":
+                        metadata["type"] = "text"
+                        metadata["description"] = "风格提示词 / 声音描述"
+                        metadata["hint"] = "固定音色模式填写语气、语速等；声音设计模式填写声线、音色质感和说话方式。可先试听，保存后才影响机器人。"
+                    elif key == "model":
+                        metadata["options"] = [
+                            {"value": "mimo-v2.5-tts", "label": "固定音色 · MiMo V2.5 TTS"},
+                            {"value": "mimo-v2.5-tts-voicedesign", "label": "设计新声线 · VoiceDesign"},
+                            {"value": "mimo-v2.5-tts-voiceclone", "label": "参考音频克隆 · VoiceClone"},
+                        ]
+                        metadata["hint"] = "声音设计/克隆不使用预置音色，且不支持唱歌；克隆每次自动附带本地样本。唱歌请另选基础 MiMo TTS 作为唱歌专用 Provider。支持草稿试听。"
+                    elif key == "mimo-tts-reference-audio":
+                        metadata.update({"type": "string", "description": "克隆参考音频", "hint": "本地保存的样本ID；请使用上传按钮选择5至30秒WAV。每次合成自动复用，风格与方言可继续调节。"})
+                    elif key == "mimo-tts-singing-provider-id":
+                        metadata["options"] = [
+                            {"value": "", "label": "不单独绑定（仅基础TTS可直接唱歌）"},
+                            *[
+                                {"value": item["id"], "label": item["id"]}
+                                for item in self._tts_provider_runtime_configs()
+                                if item.get("type") == "mimo_tts_api"
+                                and item.get("model") == "mimo-v2.5-tts"
+                                and item.get("enable")
+                            ],
+                        ]
                 if provider_type == "fishaudio_tts_api" and key == "model":
                     metadata.update(
                         {
@@ -20388,6 +20429,24 @@ class PrivateCompanionPageApi(
             if model not in allowed:
                 raise ValueError("Fish Audio 模型不在支持列表中")
             normalized["model"] = model
+        if provider_type == "mimo_tts_api" and normalized.get("model") == "mimo-v2.5-tts-voiceclone":
+            from astrbot.core.provider.sources.mimo_tts_reference import read_reference
+
+            read_reference(str(normalized.get("mimo-tts-reference-audio") or ""))
+        if provider_type == "mimo_tts_api" and "mimo-tts-singing-provider-id" in values:
+            singing_id = self._single_line(normalized.get("mimo-tts-singing-provider-id"), 160)
+            if singing_id:
+                singer = next(
+                    (item for item in self._tts_provider_runtime_configs() if item.get("id") == singing_id),
+                    {},
+                )
+                if (
+                    not singer.get("enable")
+                    or singer.get("type") != "mimo_tts_api"
+                    or singer.get("model") != "mimo-v2.5-tts"
+                ):
+                    raise ValueError("演唱通道必须选择已启用的基础 MiMo TTS，不能使用克隆或声音设计模型")
+            normalized["mimo-tts-singing-provider-id"] = singing_id
         normalized["id"] = self._single_line(current.get("id"), 160)
         normalized["type"] = provider_type
         normalized["provider_type"] = "text_to_speech"
@@ -20439,7 +20498,7 @@ class PrivateCompanionPageApi(
         existing_ids: set[str],
     ) -> str:
         source = re.sub(r"[^A-Za-z0-9._:-]+", "-", str(source_provider_id or "")).strip("._:-") or "tts"
-        language = language if language in {"zh", "ja", "en"} else "voice"
+        language = language if language in {"zh", "ja", "en", "singing"} else "voice"
         existing_lower = {str(item or "").lower() for item in existing_ids}
         for index in range(1, 1000):
             suffix = f"-{language}" if index == 1 else f"-{language}-{index}"
@@ -20453,10 +20512,11 @@ class PrivateCompanionPageApi(
         payload = await request.get_json(silent=True) or {}
         source_provider_id = self._single_line(payload.get("source_provider_id"), 160)
         language = self._single_line(payload.get("language"), 8).lower()
+        singing = payload.get("purpose") == "singing"
         incoming = payload.get("config") if isinstance(payload.get("config"), dict) else {}
         if not source_provider_id:
             return self._error("缺少源 TTS Provider ID")
-        if language not in {"zh", "ja", "en"}:
+        if not singing and language not in {"zh", "ja", "en"}:
             return self._error("语种必须是 zh、ja 或 en")
         try:
             manager = self._tts_provider_manager()
@@ -20467,6 +20527,26 @@ class PrivateCompanionPageApi(
             )
             if not self._is_tts_provider_config(current):
                 return self._error("源 TTS Provider 不存在")
+            if singing:
+                if current.get("type") != "mimo_tts_api":
+                    return self._error("独立演唱通道仅支持 MiMo TTS")
+                if not callable(getattr(manager, "update_provider", None)):
+                    return self._error("当前 AstrBot 不支持动态绑定演唱通道")
+                language = "singing"
+                incoming = {
+                    "enable": True,
+                    "values": {
+                        "model": "mimo-v2.5-tts",
+                        "mimo-tts-reference-audio": "",
+                        "mimo-tts-style-prompt": "",
+                        "mimo-tts-seed-text": "",
+                        "mimo-tts-dialect": "",
+                        "mimo-tts-singing-provider-id": "",
+                        "mimo-tts-voice": current.get("mimo-tts-voice")
+                        if current.get("mimo-tts-voice") in {"冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean"}
+                        else "冰糖",
+                    },
+                }
             runtime_configs = self._tts_provider_runtime_configs()
             clone_id = self._tts_language_clone_provider_id(
                 source_provider_id,
@@ -20483,6 +20563,10 @@ class PrivateCompanionPageApi(
             if not callable(creator):
                 return self._error("当前 AstrBot 不支持动态创建 Provider")
             await creator(normalized)
+            if singing:
+                bound_speaker = deepcopy(current)
+                bound_speaker["mimo-tts-singing-provider-id"] = clone_id
+                await manager.update_provider(source_provider_id, bound_speaker)
             result = self._tts_provider_management_payload()
             result.update(
                 {
@@ -20622,6 +20706,148 @@ class PrivateCompanionPageApi(
             result.get("elapsed_ms"),
         )
         return self._ok(result)
+
+    async def upload_tts_reference_audio(self) -> dict[str, Any]:
+        """Store a reference without modifying any provider or bot binding.
+
+        Returns:
+            Local reference metadata, or a safe validation error.
+        """
+        payload = await request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return self._error("参考音频请求必须是对象")
+        current = self._tts_provider_manager().get_provider_config_by_id(
+            self._single_line(payload.get("provider_id"), 160)
+        )
+        if not isinstance(current, dict) or current.get("type") != "mimo_tts_api":
+            return self._error("请选择已有MiMo TTS服务上传参考音频")
+        encoded = payload.get("audio_base64")
+        if not isinstance(encoded, str) or not encoded or len(encoded) > 10_000_000:
+            return self._error("请选择7.5MB以内的WAV，编码后不可超过10MB")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError):
+            return self._error("参考音频编码无效，请重新选择WAV文件")
+        try:
+            from astrbot.core.provider.sources.mimo_tts_reference import (
+                store_reference,
+                validate_reference,
+            )
+
+            reference_id = await asyncio.to_thread(store_reference, data)
+            return self._ok({
+                "reference_id": reference_id,
+                "duration_seconds": validate_reference(data),
+                "size_bytes": len(data),
+                "saved_to_provider": False,
+            })
+        except ValueError as exc:
+            return self._error(str(exc))
+        except Exception as exc:
+            logger.warning("[PrivateCompanionPage] TTS reference upload failed: %s", type(exc).__name__)
+            return self._error("参考音频本地保存失败，请检查数据目录")
+
+    async def preview_tts_provider_config(self) -> dict[str, Any]:
+        """Synthesize a MiMo draft without changing the running provider.
+
+        Returns:
+            Audio data for the authenticated page, or a safe validation error.
+        """
+        payload = await request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return self._error("试听请求必须是对象")
+        provider_id = self._single_line(payload.get("provider_id"), 160)
+        text = str(payload.get("text") or "").strip()
+        if not text or len(text) > 300:
+            return self._error("试听文本请填写1至300个字")
+        lock = getattr(self, "_tts_preview_lock", None)
+        if lock is None:
+            lock = self._tts_preview_lock = asyncio.Lock()
+        if lock.locked():
+            return self._error("已有试听正在生成，请稍后再试")
+        async with lock:
+            provider = None
+            audio_path = None
+            started = time.monotonic()
+            try:
+                manager = self._tts_provider_manager()
+                current = manager.get_provider_config_by_id(provider_id)
+                if (
+                    not isinstance(current, dict)
+                    or current.get("type") != "mimo_tts_api"
+                ):
+                    return self._error("请选择已有的MiMo TTS服务进行试听")
+                merge = getattr(manager, "get_merged_provider_config", None)
+                current = merge(current) if callable(merge) else deepcopy(current)
+                incoming = payload.get("config")
+                config = self._normalized_tts_provider_update(
+                    current,
+                    incoming if isinstance(incoming, dict) else {},
+                    self._tts_provider_schema_bundle(),
+                )
+                if config.get("model") not in {
+                    "mimo-v2.5-tts",
+                    "mimo-v2.5-tts-voicedesign",
+                    "mimo-v2.5-tts-voiceclone",
+                }:
+                    return self._error("试听支持MiMo固定音色、VoiceDesign和VoiceClone模型")
+                if (
+                    config["model"].endswith("voicedesign")
+                    and not str(config.get("mimo-tts-style-prompt") or "").strip()
+                ):
+                    return self._error("请先填写声音描述，再试听新声线")
+                # Use a private client and browser-playable output. Never update
+                # manager instances, saved configuration, or chat delivery state.
+                from astrbot.core.provider.sources.mimo_tts_api_source import (
+                    ProviderMiMoTTSAPI,
+                )
+
+                config["mimo-tts-format"] = "wav"
+                provider = ProviderMiMoTTSAPI(config, {})
+                audio_path = Path(
+                    await asyncio.wait_for(provider.get_audio(text), timeout=90.0)
+                )
+                size = audio_path.stat().st_size
+                if size <= 0 or size > 8 * 1024 * 1024:
+                    return self._error("试听音频为空或超过8MiB，请缩短文本后重试")
+                audio = audio_path.read_bytes()
+                return self._ok(
+                    {
+                        "audio_base64": base64.b64encode(audio).decode("ascii"),
+                        "mime_type": "audio/wav",
+                        "model": config["model"],
+                        "preview_only": True,
+                        "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    }
+                )
+            except asyncio.TimeoutError:
+                return self._error("试听生成超时，请缩短文本或稍后重试")
+            except ValueError as exc:
+                return self._error(str(exc))
+            except Exception as exc:
+                logger.warning(
+                    "[PrivateCompanionPage] TTS preview failed: provider=%s error=%s",
+                    provider_id,
+                    type(exc).__name__,
+                )
+                return self._error(
+                    f"试听失败（{type(exc).__name__}），请检查接口配置或缩短文本后重试"
+                )
+            finally:
+                if provider is not None:
+                    try:
+                        await provider.terminate()
+                    except Exception:
+                        logger.warning(
+                            "[PrivateCompanionPage] Failed to close preview client"
+                        )
+                if audio_path is not None:
+                    try:
+                        audio_path.unlink(missing_ok=True)
+                    except OSError:
+                        logger.warning(
+                            "[PrivateCompanionPage] Failed to remove preview audio"
+                        )
 
     @staticmethod
     def _provider_config(provider: Any) -> Any:

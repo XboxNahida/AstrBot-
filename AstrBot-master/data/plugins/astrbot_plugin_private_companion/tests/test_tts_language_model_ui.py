@@ -51,6 +51,18 @@ class TtsLanguageModelUiTests(unittest.TestCase):
         self.assertIn(".feature-param-card-head", self.css)
         self.assertIn(".feature-model-config-jump", self.css)
 
+    def test_mimo_draft_preview_has_player_and_keeps_two_results(self) -> None:
+        for folder in ("companion-panel", "陪伴面板"):
+            script = (ROOT / "pages" / folder / "app.js").read_text(encoding="utf-8")
+            self.assertIn('data-tts-preview-text maxlength="300"', script)
+            self.assertIn('postJson("/tts/provider/preview", { provider_id: selected.id, text, config: draft })', script)
+            self.assertIn('audio controls preload="metadata" data-tts-preview-audio', script)
+            self.assertIn("results.slice(0, 2)", script)
+            self.assertIn("URL.revokeObjectURL(item.url)", script)
+            self.assertIn("state.ttsProviderPreviewBusy", script)
+            self.assertIn("不会改变机器人当前配置", script)
+            self.assertIn("当前模式使用下方声音描述", script)
+
     def test_astrbot_provider_management_is_complete(self) -> None:
         for route in ("/tts/providers", "/tts/provider/create", "/tts/provider/clone", "/tts/provider/update", "/tts/provider/test"):
             self.assertIn(route, self.script)
@@ -61,12 +73,51 @@ class TtsLanguageModelUiTests(unittest.TestCase):
         self.assertIn("options.length", self.script)
         self.assertIn('"s2.1-pro-free", "S2.1 Pro Free"', self.script)
 
+    def test_clone_upload_only_updates_draft_and_keeps_style_controls(self) -> None:
+        for folder in ("companion-panel", "陪伴面板"):
+            with self.subTest(folder=folder):
+                script = (ROOT / "pages" / folder / "app.js").read_text(encoding="utf-8")
+                for marker in (
+                    'key === "mimo-tts-reference-audio"',
+                    'data-tts-reference-upload',
+                    'accept=".wav,audio/wav,audio/x-wav"',
+                    'postJson("/tts/reference/upload"',
+                    'updateProviderDraft("mimo-tts-reference-audio", result.reference_id)',
+                    'state.ttsReferenceUploadBusy',
+                    'file.size > 7_500_000',
+                    '当前模式使用参考录音',
+                    '上传仅保存样本，点击保存后才应用',
+                ):
+                    self.assertTrue(marker in script, f"{folder}: missing {marker}")
+                start = script.index('editor.querySelector("[data-tts-reference-upload]")')
+                end = script.index('editor.querySelector("[data-tts-preview-text]")', start)
+                upload = script[start:end]
+                self.assertNotIn('/tts/provider/update', upload)
+                self.assertNotIn('/settings/update', upload)
+                self.assertIn('new FileReader()', upload)
+                self.assertIn('reader.onerror', upload)
+
     def test_provider_configuration_follows_selected_language(self) -> None:
         self.assertIn('data-tts-config-language=', self.script)
         self.assertIn('const activeProviderId = activeRouteMeta ? String(ttsProviderValues()[activeRouteMeta.key]', self.script)
         self.assertIn('创建并用于${escapeHtml(meta.label)}', self.script)
         self.assertIn('保存${escapeHtml(meta.label)} Provider', self.script)
         self.assertIn('postJson("/settings/update", { settings: { ...ttsStrategyValues(), ...savedRouteValues } })', self.script)
+
+    def test_singing_channel_creation_keeps_global_routes_and_speech_voice(self) -> None:
+        for folder in ("companion-panel", "陪伴面板"):
+            with self.subTest(folder=folder):
+                script = (ROOT / "pages" / folder / "app.js").read_text(encoding="utf-8")
+                self.assertTrue("创建并绑定唱歌通道" in script)
+                self.assertTrue("克隆和声音设计不支持唱歌" in script)
+                start = script.index('editor.querySelector("[data-tts-create-singing]")')
+                end = script.index('editor.querySelector("[data-tts-provider-enable]")', start)
+                handler = script[start:end]
+                self.assertIn('purpose: "singing"', handler)
+                self.assertIn("source_provider_id: selected.id", handler)
+                self.assertNotIn("/settings/update", handler)
+                self.assertNotIn("api_key", handler)
+                self.assertIn("ttsProviderConfigDrafts[selectedDraftKey]", handler)
 
     def test_shared_provider_is_copied_before_language_specific_save(self) -> None:
         self.assertIn("function ttsProviderConfigDraftKey(providerId, language", self.script)

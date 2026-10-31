@@ -15,6 +15,7 @@ from .capability_hub import (
     CapabilityDecision,
     build_capability_context,
     decision_action_allowed,
+    explicit_singing_request,
     format_capability_guidance,
     judge_capabilities,
 )
@@ -25,19 +26,21 @@ from .short_term_emotion import advance_emotion
 
 
 def gate_request_search_tools(req: Any) -> None:
-    """Hide search tools when this request's hub decision did not select search."""
+    """Hide web or music tools when the hub did not select that capability."""
     decision = getattr(req, "_private_companion_capability_decision", None)
-    if decision_action_allowed(decision, "search"):
-        return
     tool_set = getattr(req, "func_tool", None)
     remove_tool = getattr(tool_set, "remove_tool", None)
     if not callable(remove_tool):
         return
+    search_allowed = decision_action_allowed(decision, "search")
+    music_allowed = decision_action_allowed(decision, "music")
     for tool in tuple(getattr(tool_set, "tools", ()) or ()):
         name = str(getattr(tool, "name", "") or "")
-        if name == "AIsearch" or name.startswith("web_search_") or name in {
+        is_search_tool = name == "AIsearch" or name.startswith("web_search_") or name in {
             "tavily_extract_web_page", "firecrawl_extract_web_page", "exa_get_contents"
-        }:
+        }
+        is_music_tool = name in {"find_music", "deliver_music", "search_music"}
+        if (is_search_tool and not search_allowed) or (is_music_tool and not music_allowed):
             remove_tool(name)
 
 
@@ -483,6 +486,13 @@ async def append_capability_guidance(
         )
         if req is None or request_has_search:
             available_actions.append("search")
+        request_has_music = any(
+            name in {"find_music", "deliver_music", "search_music"}
+            for name in tool_names
+        )
+        if req is None or request_has_music:
+            available_actions.append("music")
+        setattr(event, "_private_companion_singing_requested", explicit_singing_request(current_text))
         context = build_capability_context(
             scope=scope,
             current_text=current_text,

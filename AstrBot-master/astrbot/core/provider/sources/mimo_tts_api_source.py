@@ -1,3 +1,4 @@
+import asyncio
 import base64
 
 from astrbot.core.utils.datetime_utils import generate_timestamp_id
@@ -17,6 +18,7 @@ from .mimo_api_common import (
     get_temp_dir,
     normalize_timeout,
 )
+from .mimo_tts_reference import read_reference
 
 
 @register_provider_adapter(
@@ -42,33 +44,19 @@ class ProviderMiMoTTSAPI(TTSProvider):
         self.seed_text = provider_config.get(
             "mimo-tts-seed-text", DEFAULT_MIMO_TTS_SEED_TEXT
         )
+        self.reference_audio = provider_config.get("mimo-tts-reference-audio", "")
         self.set_model(provider_config.get("model", DEFAULT_MIMO_TTS_MODEL))
         self.client = create_http_client(self.timeout, self.proxy)
 
     def _build_user_prompt(self) -> str | None:
-        seed_text = self.seed_text.strip()
-        return seed_text or None
-
-    def _build_style_prefix(self) -> str:
-        style_parts: list[str] = []
-
-        if self.style_prompt.strip():
-            style_parts.append(self.style_prompt.strip())
-        if self.dialect.strip():
-            style_parts.append(self.dialect.strip())
-
-        style_content = " ".join(style_parts).strip()
-        if not style_content:
-            return ""
-
-        # MiMo recommends using only the singing style tag at the very beginning.
-        if "唱歌" in style_content:
-            return "<style>唱歌</style>"
-
-        return f"<style>{style_content}</style>"
-
-    def _build_assistant_content(self, text: str) -> str:
-        return f"{self._build_style_prefix()}{text}"
+        # The official API uses user instructions for voice direction and
+        # synthesizes only the assistant message.
+        instructions = "\n".join(
+            value.strip()
+            for value in (self.seed_text, self.style_prompt, self.dialect)
+            if value.strip()
+        )
+        return instructions or None
 
     def _build_payload(self, text: str) -> dict:
         messages: list[dict[str, str]] = []
@@ -85,13 +73,17 @@ class ProviderMiMoTTSAPI(TTSProvider):
         messages.append(
             {
                 "role": "assistant",
-                "content": self._build_assistant_content(text),
+                "content": text,
             }
         )
 
         audio_params = {"format": self.audio_format}
-        # voice design 模型不支持 audio.voice 参数
-        if "voicedesign" not in self.model_name:
+        if self.model_name == "mimo-v2.5-tts-voiceclone":
+            reference = read_reference(self.reference_audio)
+            audio_params["voice"] = (
+                "data:audio/wav;base64," + base64.b64encode(reference).decode("ascii")
+            )
+        elif "voicedesign" not in self.model_name:
             audio_params["voice"] = self.voice
 
         return {
@@ -101,10 +93,11 @@ class ProviderMiMoTTSAPI(TTSProvider):
         }
 
     async def get_audio(self, text: str) -> str:
+        payload = await asyncio.to_thread(self._build_payload, text)
         response = await self.client.post(
             build_api_url(self.api_base),
             headers=build_headers(self.chosen_api_key),
-            json=self._build_payload(text),
+            json=payload,
         )
 
         try:

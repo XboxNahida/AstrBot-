@@ -23,7 +23,9 @@ class _FakeTtsProvider:
 
 
 class _FakeContext:
-    def __init__(self, providers: list[_FakeTtsProvider], current: _FakeTtsProvider | None = None) -> None:
+    def __init__(
+        self, providers: list[_FakeTtsProvider], current: _FakeTtsProvider | None = None
+    ) -> None:
         self.providers = providers
         self.current = current
 
@@ -40,7 +42,9 @@ class _RoutingHarness(TtsEnhancementMixin):
         self.ja = _FakeTtsProvider("tts-ja", "日语声线", "fish-s2.1")
         self.en = _FakeTtsProvider("tts-en", "English Voice", "edge-en-US")
         self.default = _FakeTtsProvider("tts-default", "默认声线", "default")
-        self.context = _FakeContext([self.zh, self.ja, self.en, self.default], self.default)
+        self.context = _FakeContext(
+            [self.zh, self.ja, self.en, self.default], self.default
+        )
         self.tts_synthesis_backend = "astrbot_provider"
         self.tts_voice_language = "ja"
         self.tts_provider_id_zh = "tts-zh"
@@ -55,35 +59,142 @@ class _RoutingHarness(TtsEnhancementMixin):
 
 
 class TtsLanguageProviderRoutingTests(unittest.TestCase):
+    def test_bot_config_beats_global_language_route_in_groups_and_private(self) -> None:
+        harness = _RoutingHarness()
+        harness.tts_voice_language = "zh"
+        xiaoqi = _FakeTtsProvider("tts-xiaoqi", "小七", "mimo-v2.5-tts")
+        wanning = _FakeTtsProvider("tts-wanning", "晚柠", "mimo-v2.5-tts")
+        harness.context.providers.extend([xiaoqi, wanning])
+        default_config = {
+            "provider_tts_settings": {"enable": True, "provider_id": "tts-default"}
+        }
+        configs = {
+            "Nahida": {
+                "provider_tts_settings": {"enable": True, "provider_id": "tts-xiaoqi"}
+            },
+            "likh": {
+                "provider_tts_settings": {"enable": True, "provider_id": "tts-wanning"}
+            },
+        }
+        harness.context.get_config = lambda umo=None: configs.get(
+            str(umo).split(":")[0], default_config
+        )
+        for _ in range(3):
+            for bot, expected in (("Nahida", xiaoqi), ("likh", wanning)):
+                for scope in ("GroupMessage", "FriendMessage"):
+                    event = SimpleNamespace(unified_msg_origin=f"{bot}:{scope}:same-id")
+                    self.assertIs(
+                        harness._resolve_tts_synthesis_provider(event, harness.default),
+                        expected,
+                    )
+        self.assertEqual(harness.tts_provider_id_zh, "tts-zh")
+        self.assertEqual(harness.context.current, harness.default)
+
+    def test_unbound_bot_keeps_global_language_route(self) -> None:
+        harness = _RoutingHarness()
+        default_config = {
+            "provider_tts_settings": {"enable": True, "provider_id": "tts-default"}
+        }
+        harness.context.get_config = lambda _umo=None: default_config
+        event = SimpleNamespace(unified_msg_origin="other:GroupMessage:group")
+        self.assertIs(
+            harness._resolve_tts_synthesis_provider(event, harness.default), harness.ja
+        )
+
+    def test_missing_bot_provider_does_not_use_another_bots_voice(self) -> None:
+        harness = _RoutingHarness()
+        default_config = {
+            "provider_tts_settings": {"enable": True, "provider_id": "tts-default"}
+        }
+        scoped_config = {
+            "provider_tts_settings": {
+                "enable": True,
+                "provider_id": "deleted-bot-voice",
+            }
+        }
+        harness.context.get_config = lambda umo=None: (
+            scoped_config if umo else default_config
+        )
+        event = SimpleNamespace(unified_msg_origin="likh:GroupMessage:group")
+        self.assertIsNone(
+            harness._resolve_tts_synthesis_provider(event, harness.default)
+        )
+
+    def test_bot_config_can_disable_tts_without_global_override(self) -> None:
+        harness = _RoutingHarness()
+        default_config = {
+            "provider_tts_settings": {"enable": True, "provider_id": "tts-default"}
+        }
+        scoped_config = {
+            "provider_tts_settings": {"enable": False, "provider_id": "tts-en"}
+        }
+        harness.context.get_config = lambda umo=None: (
+            scoped_config if umo else default_config
+        )
+        event = SimpleNamespace(unified_msg_origin="likh:FriendMessage:user")
+        self.assertIsNone(
+            harness._resolve_tts_synthesis_provider(event, harness.default)
+        )
+
+    def test_explicit_session_provider_beats_global_language_route(self) -> None:
+        harness = _RoutingHarness()
+        default_config = {
+            "provider_tts_settings": {"enable": True, "provider_id": "tts-default"}
+        }
+        harness.context.get_config = lambda _umo=None: default_config
+        event = SimpleNamespace(unified_msg_origin="Nahida:FriendMessage:user")
+        self.assertIs(
+            harness._resolve_tts_synthesis_provider(event, harness.en), harness.en
+        )
+
     def test_each_language_resolves_its_configured_provider(self) -> None:
         harness = _RoutingHarness()
-        for language, expected in (("zh", harness.zh), ("ja", harness.ja), ("en", harness.en)):
+        for language, expected in (
+            ("zh", harness.zh),
+            ("ja", harness.ja),
+            ("en", harness.en),
+        ):
             with self.subTest(language=language):
                 harness.tts_voice_language = language
-                self.assertIs(harness._resolve_tts_synthesis_provider(None, harness.default), expected)
+                self.assertIs(
+                    harness._resolve_tts_synthesis_provider(None, harness.default),
+                    expected,
+                )
 
-    def test_missing_or_invalid_language_provider_falls_back_to_session_provider(self) -> None:
+    def test_missing_or_invalid_language_provider_falls_back_to_session_provider(
+        self,
+    ) -> None:
         harness = _RoutingHarness()
         harness.tts_voice_language = "zh"
         harness.tts_provider_id_zh = ""
-        self.assertIs(harness._resolve_tts_synthesis_provider(None, harness.default), harness.default)
+        self.assertIs(
+            harness._resolve_tts_synthesis_provider(None, harness.default),
+            harness.default,
+        )
 
         harness.tts_provider_id_zh = "removed-provider"
-        self.assertIs(harness._resolve_tts_synthesis_provider(None, harness.default), harness.default)
+        self.assertIs(
+            harness._resolve_tts_synthesis_provider(None, harness.default),
+            harness.default,
+        )
 
     def test_explicit_mimo_backend_keeps_mimo_precedence(self) -> None:
         harness = _RoutingHarness()
         mimo = object()
         harness.tts_synthesis_backend = "mimo_voice_clone"
         harness._find_mimo_voice_clone_tts_adapter = lambda _event: mimo
-        self.assertIs(harness._resolve_tts_synthesis_provider(None, harness.default), mimo)
+        self.assertIs(
+            harness._resolve_tts_synthesis_provider(None, harness.default), mimo
+        )
 
     def test_language_command_switches_provider_without_reload(self) -> None:
         harness = _RoutingHarness()
         response = harness._set_tts_voice_language_from_command("中文")
         self.assertIn("中文", response)
         self.assertEqual(harness.data["runtime_settings"]["tts_voice_language"], "zh")
-        self.assertIs(harness._resolve_tts_synthesis_provider(None, harness.default), harness.zh)
+        self.assertIs(
+            harness._resolve_tts_synthesis_provider(None, harness.default), harness.zh
+        )
         self.assertEqual(harness.saved, 1)
 
     def test_dedicated_language_provider_model_beats_global_fish_fallback(self) -> None:
@@ -93,7 +204,9 @@ class TtsLanguageProviderRoutingTests(unittest.TestCase):
         harness.ja.provider_config["model"] = "s2.1-pro"
         harness.ja.model_name = "s2.1-pro"
         self.assertEqual(
-            harness._tts_fishaudio_model_for_provider(harness.ja, harness.ja.provider_config),
+            harness._tts_fishaudio_model_for_provider(
+                harness.ja, harness.ja.provider_config
+            ),
             "s2.1-pro",
         )
 
@@ -103,7 +216,9 @@ class TtsLanguageProviderRoutingTests(unittest.TestCase):
         api.plugin = SimpleNamespace(context=harness.context)
         items = api._available_tts_provider_items()
         self.assertEqual(items[0]["id"], "tts-default")
-        self.assertEqual({item["id"] for item in items[1:]}, {"tts-en", "tts-ja", "tts-zh"})
+        self.assertEqual(
+            {item["id"] for item in items[1:]}, {"tts-en", "tts-ja", "tts-zh"}
+        )
         default = items[0]
         self.assertTrue(default["is_default"])
         japanese = next(item for item in items if item["id"] == "tts-ja")

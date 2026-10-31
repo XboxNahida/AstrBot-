@@ -19,6 +19,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from astrbot.api import logger
+
 try:
     from astrbot.api.message_components import Plain, Record
 except ImportError:
@@ -28,8 +29,13 @@ from astrbot.core import file_token_service
 from astrbot.core.message.message_event_result import ResultContentType
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .helpers import _normalize_outbound_punctuation_flow, _safe_int, _single_line, _strip_nonstandard_chat_control_tags
-from .capability_hub import decision_action_allowed
+from .capability_hub import decision_action_allowed, explicit_singing_request
+from .helpers import (
+    _normalize_outbound_punctuation_flow,
+    _safe_int,
+    _single_line,
+    _strip_nonstandard_chat_control_tags,
+)
 from .segmented_message import (
     component_kind,
     component_order_from_owner,
@@ -37,12 +43,32 @@ from .segmented_message import (
     plan_component_chunks,
 )
 
-
 TTS_BLOCK_PATTERN = re.compile(r"<t{2,}s\b[^>]*>.*?</t{2,}s>", re.IGNORECASE | re.DOTALL)
 TTS_TAG_PATTERN = re.compile(r"</?t{2,}s\b[^>]*>", re.IGNORECASE)
 TTS_BLOCK_TOKEN_PATTERN = re.compile(r"\[\[TTSBLOCK:([0-9a-f]{16})\]\]")
 PRIVATE_TTS_BLOCK_TOKEN_PATTERN = re.compile(r"\[\[PCTTS:([0-9a-f]{16})\]\]")
 EMOTION_TAG_PATTERN = re.compile(r"\[([^\[\]\n]{1,24})\]")
+
+
+def _ensure_singing_tts_tag(markup: str, enabled: bool) -> str:
+    """Prefix a VoiceClone-compatible singing tag when this turn requests singing.
+
+    Args:
+        markup: TTS markup containing a ``<tts>`` or ``<pc_tts>`` block.
+        enabled: Whether the current event explicitly requests singing.
+
+    Returns:
+        Markup with exactly one leading ``(唱歌)`` cue when enabled.
+    """
+    if not enabled:
+        return markup
+    opening = re.search(r"<(?:pc_)?tts\b[^>]*>", markup, flags=re.IGNORECASE)
+    if opening is None:
+        return f"<tts>(唱歌){markup}</tts>"
+    content = markup[opening.end() :]
+    if content.lstrip().startswith("(唱歌)"):
+        return markup
+    return f"{markup[:opening.end()]}(唱歌){content}"
 FISH_AUDIO_S2_CUE_PATTERN = re.compile(r"\[([^\[\]\n]{1,40})\]")
 FISH_AUDIO_S1_CUE_PATTERN = re.compile(r"\(([^()\n]{1,24})\)", re.IGNORECASE)
 FISH_AUDIO_MODELS = {"s1", "s2-pro", "s2.1-pro", "s2.1-pro-free"}
@@ -645,10 +671,14 @@ class TtsEnhancementMixin:
                 pass
         return ""
 
-    def _language_tts_provider(self, event: Any = None) -> Any:
+    def _language_tts_provider(
+        self, event: Any = None, *, provider_id: str = ""
+    ) -> Any:
         language = self._tts_voice_language_for_event(event)
         attr = TTS_LANGUAGE_PROVIDER_ATTRS.get(language, "")
-        provider_id = _single_line(getattr(self, attr, ""), 160) if attr else ""
+        provider_id = provider_id or (
+            _single_line(getattr(self, attr, ""), 160) if attr else ""
+        )
         if not provider_id:
             return None
         context = getattr(self, "context", None)
@@ -667,22 +697,92 @@ class TtsEnhancementMixin:
         if getattr(self, "_tts_language_provider_warning_key", "") != warning_key:
             self._tts_language_provider_warning_key = warning_key
             logger.warning(
-                "[PrivateCompanion] 当前语种配置的 TTS Provider 不可用,已回退现有合成链路: language=%s provider=%s",
+                "[PrivateCompanion] Selected TTS provider is unavailable: language=%s provider=%s",
                 language,
                 provider_id,
             )
         return None
 
-    def _resolve_tts_synthesis_provider(self, event: Any, astrbot_provider: Any = None) -> Any:
+    def _resolve_tts_synthesis_provider(
+        self, event: Any, astrbot_provider: Any = None
+    ) -> Any:
+        speaking_provider = self._resolve_tts_speaking_provider(event, astrbot_provider)
+        if speaking_provider is None or not (
+            bool(getattr(event, "_private_companion_singing_requested", False))
+            or explicit_singing_request(getattr(event, "message_str", ""))
+        ):
+            return speaking_provider
+        config = getattr(speaking_provider, "provider_config", {}) or {}
+        if config.get("type") != "mimo_tts_api":
+            return speaking_provider
+        singing_id = _single_line(config.get("mimo-tts-singing-provider-id"), 160)
+        singing_provider = (
+            self._language_tts_provider(event, provider_id=singing_id)
+            if singing_id
+            else speaking_provider
+        )
+        singing_config = getattr(singing_provider, "provider_config", {}) or {}
+        if (
+            singing_provider is None
+            or not singing_config.get("enable", True)
+            or singing_config.get("type") != "mimo_tts_api"
+            or singing_config.get("model") != "mimo-v2.5-tts"
+        ):
+            logger.warning(
+                "[PrivateCompanion] Singing requires an available base MiMo TTS provider: speaking=%s singing=%s",
+                self._tts_synthesis_provider_id(speaking_provider),
+                singing_id or "unconfigured",
+            )
+            return None
+        logger.debug(
+            "[PrivateCompanion] Selected singing provider: speaking=%s singing=%s",
+            self._tts_synthesis_provider_id(speaking_provider),
+            self._tts_synthesis_provider_id(singing_provider),
+        )
+        return singing_provider
+
+    def _resolve_tts_speaking_provider(
+        self, event: Any, astrbot_provider: Any = None
+    ) -> Any:
         mode = str(
             getattr(self, "tts_synthesis_backend", "astrbot_provider")
             or "astrbot_provider"
         ).lower()
         if mode != "mimo_voice_clone":
+            umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+            get_config = getattr(getattr(self, "context", None), "get_config", None)
+            if umo and callable(get_config):
+                try:
+                    global_config = get_config()
+                    scoped_config = get_config(umo)
+                    global_tts = global_config.get("provider_tts_settings", {})
+                    scoped_tts = scoped_config.get("provider_tts_settings", {})
+                    default_id = _single_line(global_tts.get("provider_id"), 160)
+                    scoped_id = _single_line(scoped_tts.get("provider_id"), 160)
+                    session_id = self._tts_synthesis_provider_id(astrbot_provider)
+                    # An explicit bot/session selection must not be replaced by
+                    # the plugin's shared language route. Do not mutate providers.
+                    if scoped_config is not global_config and not scoped_tts.get(
+                        "enable", True
+                    ):
+                        return None
+                    if session_id and session_id not in {default_id, scoped_id}:
+                        return astrbot_provider
+                    if scoped_id and scoped_id != default_id:
+                        # A missing dedicated voice intentionally falls back to
+                        # text rather than another bot's global voice.
+                        return self._language_tts_provider(event, provider_id=scoped_id)
+                except Exception as exc:
+                    logger.debug(
+                        "[PrivateCompanion] Failed to read scoped TTS settings: %s",
+                        type(exc).__name__,
+                    )
             language_provider = self._language_tts_provider(event)
             if language_provider is not None:
                 return language_provider
-        if mode == "astrbot_provider" or (mode == "auto" and astrbot_provider is not None):
+        if mode == "astrbot_provider" or (
+            mode == "auto" and astrbot_provider is not None
+        ):
             return astrbot_provider
 
         mimo_adapter = self._find_mimo_voice_clone_tts_adapter(event)
@@ -691,7 +791,10 @@ class TtsEnhancementMixin:
                 ready, reason = mimo_adapter.readiness()
                 if not ready:
                     state_key = f"{mimo_adapter.tool_name}:{reason}"
-                    if getattr(self, "_tts_mimo_auto_readiness_log_key", "") != state_key:
+                    if (
+                        getattr(self, "_tts_mimo_auto_readiness_log_key", "")
+                        != state_key
+                    ):
                         self._tts_mimo_auto_readiness_log_key = state_key
                         reason_label = {
                             "missing_api_key": "尚未配置 API Key",
@@ -701,7 +804,9 @@ class TtsEnhancementMixin:
                         logger.info(
                             "[PrivateCompanion] 自动识别到 MiMo TTS Voice Clone,但暂不接管合成: reason=%s fallback=%s",
                             reason_label,
-                            "AstrBot TTS provider" if astrbot_provider is not None else "文字/浏览器朗读",
+                            "AstrBot TTS provider"
+                            if astrbot_provider is not None
+                            else "文字/浏览器朗读",
                         )
                     return astrbot_provider
                 ready_key = f"{mimo_adapter.tool_name}:ready:{id(mimo_adapter.plugin)}"
@@ -1709,6 +1814,12 @@ class TtsEnhancementMixin:
         source = TTS_SPOKEN_URL_PATTERN.sub(_remove_spoken_url, source)
         source = self._strip_or_keep_emotion_tags(source, provider_kind=provider_kind)
         protected: dict[str, str] = {}
+        if provider_kind == "mimo_tts":
+            # MiMo VoiceClone uses this official cue to switch from speech to singing.
+            singing_token = f"{TTS_EMOTION_PLACEHOLDER_PREFIX}SINGINGTOKEN"
+            if "(唱歌)" in source:
+                source = source.replace("(唱歌)", singing_token)
+                protected[singing_token] = "(唱歌)"
         if self._tts_provider_allows_emotion_tags(provider_kind):
             def _protect_emotion(match: re.Match[str]) -> str:
                 token = f"{TTS_EMOTION_PLACEHOLDER_PREFIX}{len(protected)}TOKEN"
@@ -1794,6 +1905,14 @@ class TtsEnhancementMixin:
     def _tts_session_interval_remaining(self, event: Any) -> float:
         if getattr(self, "tts_frequency_control_mode", "global") == "legacy":
             return 0.0
+        hub_decision = getattr(event, "_private_companion_capability_decision", None)
+        if hub_decision is not None:
+            if decision_action_allowed(hub_decision, "voice"):
+                return 0.0
+        else:
+            signal, reason, _ = self._event_tts_request_signal(event)
+            if signal == "positive" and reason != "configured_proactive_scope":
+                return 0.0
         session = self._tts_session_key(event)
         interval = self._tts_effective_min_interval_seconds(event)
         if not session or interval <= 0:
@@ -1884,6 +2003,10 @@ class TtsEnhancementMixin:
         raw_text = str(getattr(event, "message_str", "") or "").strip()
         if bool(getattr(event, "_private_companion_tts_forced_by_message_scope", False)):
             return "positive", "configured_proactive_scope", raw_text
+        if bool(getattr(event, "_private_companion_singing_requested", False)):
+            return "positive", "singing_request", raw_text
+        if explicit_singing_request(raw_text):
+            return "positive", "singing_request", raw_text
         text = raw_text.lower()
         if not text:
             return "uncertain", "", ""
@@ -2251,6 +2374,9 @@ TTS 朗读文本：
         spoken = self._normalize_tts_spoken_text(text, provider_kind=provider_kind)
         if not spoken:
             return False
+        if provider_kind == "mimo_tts" and spoken.startswith("(唱歌)"):
+            # Singing follows the lyrics language instead of the default speaking language.
+            return False
         lang = self._tts_voice_language_for_event(event)
         kana_count = len(re.findall(r"[\u3040-\u30ff\u31f0-\u31ff]", spoken))
         cjk_count = len(re.findall(r"[\u4e00-\u9fff]", spoken))
@@ -2401,6 +2527,12 @@ TTS 朗读文本：
             "自动语音概率命中只表示本轮可以考虑语音，不表示必须使用语音。功能性回复默认保持纯文字，包括指令执行结果、帮助或菜单、配置或状态、查询结果、报错或权限说明、清单、教程、代码以及主要由卡片或图片承载的结果；只有用户明确要求语音或朗读，或回复本身主要是适合听见的自然角色表达时，才考虑语音。",
             "URL、域名、邮箱、命令、文件路径、长编号和邀请码不适合朗读：不要放进 <pc_tts>；必须在语音块外保留原文供用户点击或复制。语音里需要承接时，只自然说“链接在文字里”或“我把链接发给你了”，不要念出协议、域名、路径或参数。",
         ]
+        if bool(getattr(event, "_private_companion_singing_requested", False)):
+            rules.append(
+                "【明确演唱请求】本轮必须按演唱处理，不得退化为普通朗读；将完整歌词放入唯一语音块，"
+                "并让语音块内容以官方标签 (唱歌) 开头，例如 <pc_tts>(唱歌)完整歌词</pc_tts>。"
+                "歌词必须完整，不能只截取半句；没有可用歌词时自然创作短歌词，但仍要保留 (唱歌) 标签。"
+            )
         if (
             voice_lang != "zh"
             and delivery_mode != "voice_only"
@@ -3019,6 +3151,13 @@ TTS 朗读文本：
                     len(full_scope_fallback),
                     _single_line(full_scope_fallback, 140),
                 )
+            normalized = _ensure_singing_tts_tag(
+                normalized,
+                bool(
+                    getattr(event, "_private_companion_singing_requested", False)
+                    or explicit_singing_request(getattr(event, "message_str", ""))
+                ),
+            )
             new_chain = await self._process_tts_tags(
                 normalized,
                 event,
@@ -3851,7 +3990,13 @@ TTS 朗读文本：
             # Full fast-tag conversion has one authoritative source: the complete
             # visible reply. Let the spoken-language pass translate it once instead
             # of calling a conversion model whose markup would be discarded below.
-            converted = f"<tts>{source_text}</tts>"
+            converted = _ensure_singing_tts_tag(
+                f"<tts>{source_text}</tts>",
+                bool(
+                    getattr(event, "_private_companion_singing_requested", False)
+                    or explicit_singing_request(getattr(event, "message_str", ""))
+                ),
+            )
         else:
             converted = await self._convert_text_to_tts_markup(
                 source_text,
@@ -3864,6 +4009,13 @@ TTS 朗读文本：
             converted,
             source_text=source_text,
             event=event,
+        )
+        converted = _ensure_singing_tts_tag(
+            converted,
+            bool(
+                getattr(event, "_private_companion_singing_requested", False)
+                or explicit_singing_request(getattr(event, "message_str", ""))
+            ),
         )
         if visible_override or suppress_visible:
             try:
@@ -4082,6 +4234,10 @@ TTS 朗读文本：
         )
         if not source:
             return ""
+        singing_requested = bool(
+            getattr(event, "_private_companion_singing_requested", False)
+            or explicit_singing_request(getattr(event, "message_str", ""))
+        )
         provider = await self._get_tts_conversion_provider(event)
         provider_kind = self._tts_provider_kind_for_event(event)
         voice_lang = self._tts_voice_language_for_event(event)
@@ -4116,6 +4272,12 @@ TTS 朗读文本：
             if full
             else "只选择最适合朗读的一小段转换成语音，其余信息保留为可见文字；不要把整条长回复都塞进语音，尤其不要朗读 URL、域名、邮箱、命令、文件路径、长编号或邀请码。"
         )
+        singing_rule = (
+            "用户明确要求唱歌：语音块内容必须以官方标签 (唱歌) 开头，并包含完整歌词；"
+            "不要只做普通朗读或截断歌词。"
+            if singing_requested
+            else ""
+        )
         prompt = f"""
 请把下面这条回复转换成适合 TTS 朗读的最终输出。
 
@@ -4125,6 +4287,7 @@ TTS 朗读文本：
 显示文本规则：{display_rule}
 语种规则：{language_rule}
 Provider 规则：{emotion_rule}
+演唱规则：{singing_rule or "无"}
 补充要求：{extra or "无"}
 {persona_context}
 {expression_context}
@@ -4146,7 +4309,7 @@ Provider 规则：{emotion_rule}
         converted = self._normalize_tts_tags(converted)
         if "<tts>" not in converted.lower():
             converted = f"<tts>{converted}</tts>"
-        return converted
+        return _ensure_singing_tts_tag(converted, singing_requested)
 
     async def _postprocess_text_to_tts_markup(self, text: str, event: Any, *, provider_kind: str, full: bool = False) -> str:
         source = _single_line(
@@ -4156,6 +4319,10 @@ Provider 规则：{emotion_rule}
         if not source:
             return ""
         tts_signal, tts_signal_match, user_text = self._event_tts_request_signal(event)
+        singing_requested = bool(
+            getattr(event, "_private_companion_singing_requested", False)
+            or explicit_singing_request(getattr(event, "message_str", ""))
+        )
         provider = await self._get_tts_conversion_provider(event)
         if provider is None:
             return ""
@@ -4299,8 +4466,10 @@ Provider 规则：{emotion_rule}
                 _single_line(voice, 80),
             )
             if self._tts_voice_language_for_event(event) == "zh":
-                return f"<tts>{voice}</tts>\n{visible}" if visible and visible != voice else f"<tts>{voice}</tts>"
-            return f"<tts>{voice}</tts>\n{visible}"
+                markup = f"<tts>{voice}</tts>\n{visible}" if visible and visible != voice else f"<tts>{voice}</tts>"
+            else:
+                markup = f"<tts>{voice}</tts>\n{visible}"
+            return _ensure_singing_tts_tag(markup, singing_requested)
         except Exception as exc:
             if bool(getattr(exc, "_private_companion_tts_provider_logged", False)):
                 logger.info("[PrivateCompanion] TTS 后处理已回退纯文本: %s", _single_line(exc, 120))
@@ -5079,6 +5248,8 @@ Provider 规则：{emotion_rule}
         )
         pos = 0
         matches = list(re.finditer(r"<tts>(.*?)</tts>", normalized, flags=re.IGNORECASE | re.DOTALL))
+        # Evaluate once per reply so a successful block cannot suppress its siblings.
+        remaining = self._tts_session_interval_remaining(event)
         for index, match in enumerate(matches):
             before = normalized[pos:match.start()]
             if before.strip():
@@ -5106,7 +5277,6 @@ Provider 规则：{emotion_rule}
                     )
                 pos = match.end()
                 continue
-            remaining = self._tts_session_interval_remaining(event)
             if remaining > 0:
                 logger.info(
                     "[PrivateCompanion] TTS会话级节流生效,已隐藏朗读文本并保留可见文本: session=%s remain=%.1fs text=%s",

@@ -158,6 +158,9 @@ const state = {
   ttsProviderCreateType: "",
   ttsProviderCreateId: "",
   ttsProviderTestResults: {},
+  ttsProviderPreviews: {},
+  ttsProviderPreviewBusy: false,
+  ttsReferenceUploadBusy: false,
   imageApiStatus: null,
   imageExtensionStatus: null,
   imageExtensionError: "",
@@ -30438,6 +30441,17 @@ function ttsProviderFieldMarkup(provider, field) {
   const type = String(field.type || "string").toLowerCase();
   const options = Array.isArray(field.options) ? field.options : [];
   const configured = Boolean(provider.secret_configured?.[key]);
+  const model = String(ttsProviderFieldValue(provider, { key: "model" }));
+  if (provider.type === "mimo_tts_api" && key === "mimo-tts-reference-audio") {
+    if (model !== "mimo-v2.5-tts-voiceclone") return "";
+    return `<label class="tts-provider-field"><span class="tts-provider-field-title"><b>克隆参考音频</b></span><input type="file" data-tts-reference-upload accept=".wav,audio/wav,audio/x-wav"${state.ttsReferenceUploadBusy || state.ttsProviderPreviewBusy ? " disabled" : ""} /><small>${state.ttsReferenceUploadBusy ? "正在上传参考录音…" : value ? `已选择本地样本：${escapeHtml(String(value).slice(0, 16))}…` : "尚未选择参考录音"}。5–30秒 PCM WAV，7.5MB以内；上传仅保存样本，点击保存后才应用。后续每次合成自动复用，可继续调整下方风格和方言。</small></label>`;
+  }
+  if (provider.type === "mimo_tts_api" && key === "mimo-tts-voice" && model === "mimo-v2.5-tts-voiceclone") {
+    return `<label class="tts-provider-field"><span>音色</span><input value="由参考录音克隆声线" disabled /><small>当前模式使用参考录音，预设音色不参与生成。</small></label>`;
+  }
+  if (provider.type === "mimo_tts_api" && key === "mimo-tts-voice" && String(ttsProviderFieldValue(provider, { key: "model" })).includes("voicedesign")) {
+    return `<label class="tts-provider-field"><span>音色</span><input value="由声音描述设计新声线" disabled /><small>当前模式使用下方声音描述，预设音色不参与生成。</small></label>`;
+  }
   let control = "";
   if (type === "bool") {
     control = `<input type="checkbox" data-tts-provider-value="${escapeHtml(key)}"${value ? " checked" : ""} />`;
@@ -30485,10 +30499,11 @@ function ttsLanguageConfiguratorMarkup(settings, values, language) {
   const testResult = selected ? state.ttsProviderTestResults[selected.id] : null;
   const sharedLanguages = ttsProviderSharedLanguages(providerId, meta.language, values);
   const sharedLabels = sharedLanguages.map((item) => item.label).join("、");
+  const preview = selected ? state.ttsProviderPreviews[ttsProviderConfigDraftKey(selected.id, language)] || {} : {};
   return `
     <section class="tts-provider-section tts-language-configurator">
       <header class="tts-section-heading">
-        <div><b>按语种配置 TTS</b><span>中文、日语、英语分别使用独立 Provider；选择语种后编辑对应的 AstrBot 原生配置。</span></div>
+        <div><b>按语种配置 TTS</b><span>不同机器人请在 AstrBot 各自配置方案的“文字转语音”中选择独立 Provider；这里可选择对应 Provider 编辑音色和风格。机器人专属选择优先于全局语种设置，未单独配置时才使用全局设置。</span></div>
       </header>
       <div class="tts-language-tabs" role="tablist" aria-label="TTS 配置语种">
         ${ttsLanguageProviderMeta.map((item) => `<button type="button" role="tab" data-tts-config-language="${item.language}" class="${item.language === meta.language ? "active" : ""}" aria-selected="${item.language === meta.language ? "true" : "false"}"><b>${escapeHtml(item.label)}</b><span>${escapeHtml(item.language.toUpperCase())}</span></button>`).join("")}
@@ -30506,13 +30521,22 @@ function ttsLanguageConfiguratorMarkup(settings, values, language) {
       <div class="tts-language-provider-editor">
         ${selected ? `<div class="tts-provider-editor"><header class="tts-provider-editor-head"><div><b>${escapeHtml(selected.name || selected.type)}</b><span>${escapeHtml(selected.id)} · ${escapeHtml(selected.type)}${selected.is_default ? " · AstrBot 当前默认" : ""}</span></div><label class="tts-provider-enable"><input type="checkbox" data-tts-provider-enable${enabled ? " checked" : ""} /><span>启用</span></label></header>
           ${sharedLanguages.length ? `<div class="tts-provider-sharing-note"><b>检测到旧版共享绑定</b><span>当前与${escapeHtml(sharedLabels)}共用 Provider。修改并保存此 Provider 时会自动拆分重复绑定，单独保存语音策略不会改动 AstrBot 原生配置。</span></div>` : ""}
+          ${selected.type === "mimo_tts_api" ? `<section class="tts-provider-field-group"><h4>独立唱歌音色</h4><p>普通说话保留当前声线。克隆和声音设计不支持唱歌；明确要求唱歌时才使用下方绑定的基础 MiMo TTS。可在 AstrBot“模型提供商”中按 Provider ID 单独调整唱歌音色。</p>${!String(draft?.values?.["mimo-tts-singing-provider-id"] ?? selected.values?.["mimo-tts-singing-provider-id"] ?? "").trim() ? `<button type="button" class="secondary" data-tts-create-singing${draft ? " disabled" : ""}>创建并绑定唱歌通道</button><small>复用当前连接和密钥，创建基础TTS；已有修改请先保存。不会改变讲话声线或全局语种路由。</small>` : ""}</section>` : ""}
           <div class="tts-provider-field-groups">${ttsProviderFieldGroups.map((group) => {
             const fields = (selected.fields || [])
               .filter((field) => (field.group || "advanced") === group.id)
               .sort((left, right) => ttsProviderFieldRank(left) - ttsProviderFieldRank(right));
             if (!fields.length) return "";
             return `<section class="tts-provider-field-group"><h4>${escapeHtml(group.label)}</h4><div class="tts-provider-field-grid">${fields.map((field) => ttsProviderFieldMarkup(selected, field)).join("")}</div></section>`;
-          }).join("")}</div></div>` : `<div class="tts-provider-empty">当前${escapeHtml(meta.label)}跟随 AstrBot 会话 TTS；也可以在上方选择或新建专用 Provider。</div>`}
+          }).join("")}</div>
+          ${selected.type === "mimo_tts_api" ? `<section class="tts-provider-field-group tts-provider-preview">
+            <h4>试听当前配置</h4>
+            <p>直接试听未保存的音色、声音描述和方言；不会改变机器人当前配置，也不会发送到QQ。选择“设计新声线”模型即可试听自定义声线。</p>
+            <label class="tts-provider-field"><span>试听文本（最多300字）</span><textarea data-tts-preview-text maxlength="300" rows="3">${escapeHtml(preview.text ?? meta.sample)}</textarea></label>
+            <button type="button" class="secondary" data-tts-provider-preview${state.ttsProviderPreviewBusy || state.ttsReferenceUploadBusy ? " disabled" : ""}>${state.ttsProviderPreviewBusy ? "正在生成试听…" : "生成并试听"}</button>
+            <span role="status">${preview.error ? escapeHtml(preview.error) : "试听使用点击时的参数；满意后再点保存。每次生成会调用语音API。"}</span>
+            ${(preview.results || []).map((item, index) => `<div><b>${index === 0 ? "最近试听" : "上一次试听"}</b><small> · ${escapeHtml(item.model)} · ${item.elapsed_ms || 0} ms</small><audio controls preload="metadata" data-tts-preview-audio src="${escapeHtml(item.url)}"></audio></div>`).join("")}
+          </section>` : ""}</div>` : `<div class="tts-provider-empty">当前${escapeHtml(meta.label)}跟随 AstrBot 会话 TTS；也可以在上方选择或新建专用 Provider。</div>`}
         <footer class="tts-provider-editor-actions"><span class="tts-provider-test-result ${testResult?.ok ? "ok" : testResult ? "error" : ""}"><span>${testResult ? testResult.ok ? `测试通过 · ${testResult.elapsed_ms || 0} ms` : escapeHtml(testResult.error || "测试失败") : draft ? "Provider 有未保存修改" : "仅保存插件语种绑定与语音策略，不改 AstrBot Provider"}</span>${testResult ? `<button type="button" data-test-result-source="tts-provider" data-test-result-key="${escapeHtml(selected.id)}">查看诊断</button>` : ""}</span><button type="button" class="secondary" data-tts-provider-test${!selected?.loaded ? " disabled" : ""}>测试连接</button><button type="button" data-tts-provider-save>${draft && sharedLanguages.length ? "保存并拆分独立配置" : draft ? `保存${escapeHtml(meta.label)} Provider` : "保存 TTS 设置"}</button></footer>
       </div>
     </section>`;
@@ -30640,15 +30664,101 @@ function renderTtsModelConfig() {
       result.className = "tts-provider-test-result";
     }
   };
+  editor.querySelector("[data-tts-create-singing]")?.addEventListener("click", async (event) => {
+    if (!selected) return;
+    if (state.ttsProviderConfigDrafts[selectedDraftKey]) {
+      showToast("请先保存当前 Provider 修改，再创建演唱通道", "warn");
+      return;
+    }
+    const result = await runAction(() => postJson("/tts/provider/clone", {
+      source_provider_id: selected.id,
+      purpose: "singing",
+    }), "已创建并绑定独立唱歌通道，普通说话声线不变", event.currentTarget, { reload: false });
+    if (!result) return;
+    state.ttsProviderConfigs = result.items || [];
+    state.ttsProviderTemplates = result.templates || state.ttsProviderTemplates;
+    await loadAvailableProviders(true).catch(() => {});
+    renderTtsModelConfig();
+  });
   editor.querySelector("[data-tts-provider-enable]")?.addEventListener("change", (event) => updateProviderDraft("", event.currentTarget.checked, true));
   editor.querySelectorAll("[data-tts-provider-value]").forEach((input) => {
     const eventName = input instanceof HTMLInputElement && input.type === "checkbox" ? "change" : "input";
-    input.addEventListener(eventName, () => updateProviderDraft(
-      input.dataset.ttsProviderValue || "",
-      input instanceof HTMLInputElement && input.type === "checkbox" ? input.checked : input.value,
-    ));
+    input.addEventListener(eventName, () => {
+      updateProviderDraft(
+        input.dataset.ttsProviderValue || "",
+        input instanceof HTMLInputElement && input.type === "checkbox" ? input.checked : input.value,
+      );
+      if (selected?.type === "mimo_tts_api" && input.dataset.ttsProviderValue === "model") renderTtsModelConfig();
+    });
+  });
+  editor.querySelector("[data-tts-reference-upload]")?.addEventListener("change", async (event) => {
+    const file = event.currentTarget.files?.[0];
+    if (!selected || !file || state.ttsReferenceUploadBusy || state.ttsProviderPreviewBusy) return;
+    if (!file.size || file.size > 7_500_000) {
+      showToast("参考录音请使用7.5MB以内、5至30秒的PCM WAV", "error");
+      event.currentTarget.value = "";
+      return;
+    }
+    state.ttsReferenceUploadBusy = true;
+    renderTtsModelConfig();
+    try {
+      const audio_base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || "").split(",")[1] || "");
+        reader.onerror = () => reject(new Error("读取参考录音失败，请重新选择"));
+        reader.onabort = () => reject(new Error("参考录音读取已取消"));
+        reader.readAsDataURL(file);
+      });
+      const result = await postJson("/tts/reference/upload", { provider_id: selected.id, audio_base64 });
+      updateProviderDraft("mimo-tts-reference-audio", result.reference_id);
+      showToast(`参考录音已上传（${Number(result.duration_seconds).toFixed(1)}秒），可先试听，保存后应用`);
+    } catch (error) {
+      showToast(`上传失败：${error.message}`, "error");
+    } finally {
+      state.ttsReferenceUploadBusy = false;
+      renderTtsModelConfig();
+    }
+  });
+  editor.querySelector("[data-tts-preview-text]")?.addEventListener("input", (event) => {
+    state.ttsProviderPreviews[selectedDraftKey] = { ...state.ttsProviderPreviews[selectedDraftKey], text: event.currentTarget.value };
+  });
+  editor.querySelector("[data-tts-provider-preview]")?.addEventListener("click", async () => {
+    if (!selected || state.ttsProviderPreviewBusy || state.ttsReferenceUploadBusy) return;
+    const text = (state.ttsProviderPreviews[selectedDraftKey]?.text ?? activeRouteMeta?.sample ?? "").trim();
+    if (!text || [...text].length > 300) {
+      showToast("试听文本请填写1至300个字", "error");
+      return;
+    }
+    const draft = state.ttsProviderConfigDrafts[selectedDraftKey] || { values: {} };
+    state.ttsProviderPreviewBusy = true;
+    state.ttsProviderPreviews[selectedDraftKey] = { ...state.ttsProviderPreviews[selectedDraftKey], text, error: "" };
+    renderTtsModelConfig();
+    let generated = false;
+    try {
+      const result = await postJson("/tts/provider/preview", { provider_id: selected.id, text, config: draft });
+      const bytes = Uint8Array.from(atob(result.audio_base64), (char) => char.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: result.mime_type }));
+      const previous = state.ttsProviderPreviews[selectedDraftKey] || {};
+      const results = [{ url, model: result.model, elapsed_ms: result.elapsed_ms }, ...(previous.results || [])];
+      results.slice(2).forEach((item) => URL.revokeObjectURL(item.url));
+      state.ttsProviderPreviews[selectedDraftKey] = { ...previous, results: results.slice(0, 2) };
+      generated = true;
+    } catch (error) {
+      state.ttsProviderPreviews[selectedDraftKey] = { ...state.ttsProviderPreviews[selectedDraftKey], error: `试听失败：${error.message}` };
+      showToast(`试听失败：${error.message}`, "error");
+    } finally {
+      state.ttsProviderPreviewBusy = false;
+      renderTtsModelConfig();
+    }
+    if (generated && state.selectedTtsProviderId === selected.id && state.selectedTtsLanguage === activeRouteMeta?.language) {
+      editor.querySelector("[data-tts-preview-audio]")?.play().catch(() => {});
+    }
   });
   editor.querySelector("[data-tts-provider-save]")?.addEventListener("click", async (event) => {
+    if (state.ttsReferenceUploadBusy) {
+      showToast("参考录音上传中，请稍后保存", "error");
+      return;
+    }
     const draft = selected ? state.ttsProviderConfigDrafts[selectedDraftKey] || null : null;
     const routeValues = ttsProviderValues();
     const sharedGroups = ttsSharedProviderGroups(routeValues);

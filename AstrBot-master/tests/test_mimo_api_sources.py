@@ -53,7 +53,7 @@ def test_mimo_tts_user_prompt_returns_seed_text():
         asyncio.run(provider.terminate())
 
 
-def test_mimo_tts_assistant_content_prefixes_style_and_dialect():
+def test_mimo_tts_style_and_dialect_are_user_instructions():
     provider = _make_tts_provider(
         {
             "mimo-tts-style-prompt": "开心",
@@ -65,14 +65,14 @@ def test_mimo_tts_assistant_content_prefixes_style_and_dialect():
         payload = provider._build_payload("hello")
         assert payload["messages"][0] == {
             "role": "user",
-            "content": "You are chatting with a close friend.",
+            "content": "You are chatting with a close friend.\n开心\n四川话",
         }
-        assert payload["messages"][1]["content"] == "<style>开心 四川话</style>hello"
+        assert payload["messages"][1]["content"] == "hello"
     finally:
         asyncio.run(provider.terminate())
 
 
-def test_mimo_tts_payload_omits_user_message_without_seed_text():
+def test_mimo_tts_style_is_sent_without_seed_text():
     provider = _make_tts_provider(
         {
             "mimo-tts-seed-text": "",
@@ -82,16 +82,17 @@ def test_mimo_tts_payload_omits_user_message_without_seed_text():
     try:
         payload = provider._build_payload("hello")
         assert payload["messages"] == [
+            {"role": "user", "content": "开心"},
             {
                 "role": "assistant",
-                "content": "<style>开心</style>hello",
-            }
+                "content": "hello",
+            },
         ]
     finally:
         asyncio.run(provider.terminate())
 
 
-def test_mimo_tts_singing_style_uses_single_style_tag():
+def test_mimo_tts_singing_keeps_dialect_in_user_instructions():
     provider = _make_tts_provider(
         {
             "mimo-tts-style-prompt": "唱歌 开心",
@@ -100,7 +101,8 @@ def test_mimo_tts_singing_style_uses_single_style_tag():
     )
     try:
         payload = provider._build_payload("歌词")
-        assert payload["messages"][1]["content"] == "<style>唱歌</style>歌词"
+        assert payload["messages"][0]["content"] == "seed text\n唱歌 开心\n粤语"
+        assert payload["messages"][1]["content"] == "歌词"
     finally:
         asyncio.run(provider.terminate())
 
@@ -132,11 +134,37 @@ def test_mimo_tts_seed_text_is_not_prepended_to_assistant_content():
     )
     try:
         payload = provider._build_payload("明天就是周五了")
-        assert payload["messages"][0]["content"] == "reference text"
-        assert payload["messages"][1]["content"] == "<style>开心</style>明天就是周五了"
+        assert payload["messages"][0]["content"] == "reference text\n开心"
+        assert payload["messages"][1]["content"] == "明天就是周五了"
         assert "reference text" not in payload["messages"][1]["content"]
     finally:
         asyncio.run(provider.terminate())
+
+
+@pytest.mark.asyncio
+async def test_mimo_tts_instances_keep_independent_voice_and_style():
+    xiaoqi = _make_tts_provider(
+        {"mimo-tts-voice": "冰糖", "mimo-tts-style-prompt": "俏皮自然"}
+    )
+    wanning = _make_tts_provider(
+        {"mimo-tts-voice": "茉莉", "mimo-tts-style-prompt": "平和自然"}
+    )
+    try:
+
+        async def build(provider):
+            await asyncio.sleep(0)
+            return provider._build_payload("你好")
+
+        results = await asyncio.gather(*(build(p) for p in (xiaoqi, wanning) * 3))
+        for index, payload in enumerate(results):
+            assert payload["audio"]["voice"] == ("冰糖" if index % 2 == 0 else "茉莉")
+            assert payload["messages"][0]["content"] == "seed text\n" + (
+                "俏皮自然" if index % 2 == 0 else "平和自然"
+            )
+            assert payload["messages"][1]["content"] == "你好"
+    finally:
+        await xiaoqi.terminate()
+        await wanning.terminate()
 
 
 def test_mimo_tts_voicedesign_model_omits_voice_param():
