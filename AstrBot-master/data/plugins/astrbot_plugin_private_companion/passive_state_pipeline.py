@@ -44,6 +44,48 @@ def gate_request_search_tools(req: Any) -> None:
             remove_tool(name)
 
 
+async def _private_hub_conversation(self: Any, event: Any, req: Any) -> list[dict[str, str]]:
+    """提取当前私聊的有限历史；不传播系统提示、工具结果或媒体地址。"""
+    cached = getattr(event, "_private_companion_hub_conversation", None)
+    if isinstance(cached, list):
+        return cached
+    history = getattr(req, "contexts", None)
+    if not isinstance(history, list) or not history:
+        history = []
+        manager = getattr(getattr(self, "context", None), "conversation_manager", None)
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        if manager is not None and umo:
+            try:
+                cid = await manager.get_curr_conversation_id(umo)
+                conversation = await manager.get_conversation(umo, cid) if cid else None
+                history = json.loads(getattr(conversation, "history", "") or "[]")
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 私聊中枢历史读取失败: %s", type(exc).__name__)
+                history = []
+    projected = []
+    budget = 3000
+    for row in reversed(history if isinstance(history, list) else []):
+        if not isinstance(row, dict) or row.get("role") not in {"user", "assistant"}:
+            continue
+        content = row.get("content")
+        if isinstance(content, list):
+            content = " ".join(
+                str(part.get("text") or "") for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+        if not isinstance(content, str):
+            continue
+        content = _single_line(content, min(500, budget))
+        if content:
+            projected.append({"role": row["role"], "text": content})
+            budget -= len(content)
+        if len(projected) >= 8 or budget <= 0:
+            break
+    projected.reverse()
+    setattr(event, "_private_companion_hub_conversation", projected)
+    return projected
+
+
 async def append_capability_guidance(
     self: Any,
     event: Any,
@@ -244,6 +286,8 @@ async def append_capability_guidance(
                     }
             hub_scene["sender_identity"] = sender_identity
             setattr(event, "_private_companion_sender_identity", dict(sender_identity))
+        if is_private:
+            hub_scene["private_conversation"] = await _private_hub_conversation(self, event, req)
         rows: list[dict[str, Any]] = []
         group: dict[str, Any] = {}
         if is_private:

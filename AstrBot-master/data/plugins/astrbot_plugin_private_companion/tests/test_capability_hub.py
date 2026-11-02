@@ -399,6 +399,97 @@ class CapabilityHubTests(unittest.TestCase):
 
 
 class CapabilityGuidanceInjectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_group_ambiguous_tool_followup_requires_own_context_or_task(self):
+        now = datetime.now(timezone.utc)
+        for owner in ("u1", "u2"):
+            with self.subTest(owner=owner):
+                plugin = SimpleNamespace(_llm_call=AsyncMock(return_value=json.dumps({
+                    "reply": True, "actions": ["image_generate"], "route": "task",
+                    "segments": [{"kind": "task", "text": "生成头像"}],
+                })))
+                context = build_capability_context(
+                    scope="group:g1", current_text="那你现在调用", sender_id="u1", sender_name="甲", now=now,
+                    recent_messages=[{"scope": "group:g1", "sender_id": owner,
+                                      "text": "帮我生成一张头像", "timestamp": now}],
+                )
+                decision = await judge_capabilities(plugin, context, available_capabilities=("image_generate",))
+                self.assertEqual(owner == "u1", "image_generate" in decision.actions)
+                if owner != "u1":
+                    self.assertTrue(decision.reply)
+                    self.assertEqual("chat", decision.route)
+                    self.assertFalse(decision.segments)
+
+    async def test_private_continuation_guidance_is_not_in_group_prompt(self):
+        plugin = SimpleNamespace(_llm_call=AsyncMock(return_value='{"reply":true,"actions":[]}'))
+        context = build_capability_context(
+            scope="group:g1", current_text="那你现在调用", sender_id="u2", sender_name="乙",
+            now=datetime.now(timezone.utc),
+        )
+        await judge_capabilities(plugin, context, available_capabilities=("image_generate",))
+        self.assertNotIn("例如此前要求生成头像", plugin._llm_call.await_args.args[0])
+
+    async def test_private_preflight_reads_current_conversation_once_for_short_followup(self):
+        history = [
+            {"role": "system", "content": "不能泄漏的系统提示"},
+            {"role": "user", "content": "帮我生成一张二次元头像"},
+            {"role": "assistant", "content": "暂时调不了生图接口"},
+            {"role": "tool", "content": "不能传播的工具原始输出"},
+        ]
+        manager = SimpleNamespace(
+            get_curr_conversation_id=AsyncMock(return_value="c1"),
+            get_conversation=AsyncMock(return_value=SimpleNamespace(
+                cid="c1", history=json.dumps(history),
+            )),
+        )
+        plugin = SimpleNamespace(
+            context=SimpleNamespace(conversation_manager=manager),
+            _event_scope_key=lambda event: "private:u1",
+            _recall_message_cache={},
+            _llm_call=AsyncMock(return_value='{"reply":true,"actions":["image_generate"],"route":"task"}'),
+        )
+        event = SimpleNamespace(
+            unified_msg_origin="bot1:FriendMessage:u1", message_str="那你现在调用",
+            message_obj=SimpleNamespace(message_id="m1"),
+            is_private_chat=lambda: True, get_sender_id=lambda: "u1",
+            get_sender_name=lambda: "甲",
+        )
+        await append_capability_guidance(plugin, event, None)
+        prompt = plugin._llm_call.await_args.args[0]
+        self.assertIn("帮我生成一张二次元头像", prompt)
+        self.assertIn("暂时调不了生图接口", prompt)
+        self.assertNotIn("不能泄漏的系统提示", prompt)
+        self.assertNotIn("不能传播的工具原始输出", prompt)
+        self.assertEqual("task", event._private_companion_capability_decision.route)
+        manager.get_conversation.assert_awaited_once_with("bot1:FriendMessage:u1", "c1")
+        await append_capability_guidance(plugin, event, SimpleNamespace(system_prompt="", func_tool=None))
+        plugin._llm_call.assert_awaited_once()
+        manager.get_conversation.assert_awaited_once()
+
+    async def test_private_conversation_projection_is_bounded_and_ignores_media_urls(self):
+        history = [{"role": "user", "content": "旧话题"}] + [
+            {"role": "assistant", "content": "长回复" * 600} for _ in range(12)
+        ] + [{"role": "user", "content": [
+            {"type": "text", "text": "按刚才要求继续画"},
+            {"type": "image_url", "image_url": {"url": "https://private/image?secret=value"}},
+        ]}]
+        plugin = SimpleNamespace(
+            _event_scope_key=lambda event: "private:u1", _recall_message_cache={},
+            _llm_call=AsyncMock(return_value='{"reply":true,"actions":[]}'),
+        )
+        event = SimpleNamespace(
+            unified_msg_origin="bot1:FriendMessage:u1", message_str="继续",
+            message_obj=SimpleNamespace(message_id="m2"),
+            is_private_chat=lambda: True, get_sender_id=lambda: "u1", get_sender_name=lambda: "甲",
+        )
+        await append_capability_guidance(plugin, event, SimpleNamespace(
+            contexts=history, system_prompt="", func_tool=None,
+        ))
+        prompt = plugin._llm_call.await_args.args[0]
+        self.assertIn("按刚才要求继续画", prompt)
+        self.assertNotIn("secret=value", prompt)
+        self.assertNotIn("旧话题", prompt)
+        self.assertLess(prompt.count("长回复"), 1000)
+
     async def test_hub_uses_independent_provider_and_persona_emotion_context(self):
         llm_call = AsyncMock(return_value=json.dumps({
             "reply": True, "actions": [], "route": "mixed",
