@@ -1895,6 +1895,8 @@ async def inject_humanized_state(
         buffered_images = [
             str(item) for item in delayed_image_sources[:5] if str(item or "").strip()
         ]
+    if buffered_images:
+        setattr(event, "private_companion_delayed_image_sources", list(buffered_images[:5]))
     buffered_image_vision_limit = self._private_image_vision_text_limit(
         len(buffered_images)
     )
@@ -2184,7 +2186,7 @@ async def inject_humanized_state(
                     80,
                 ),
             )
-        else:
+        elif not direct_image_mounted:
             image_context_intro = (
                 "用户刚刚只发了一张图片,没有继续补充文字。"
                 if bool(

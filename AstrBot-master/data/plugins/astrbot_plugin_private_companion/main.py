@@ -10267,6 +10267,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         decision = getattr(event, "_private_companion_capability_decision", None)
         requested_kind = _single_line(kind, 24).casefold()
+        if requested_kind in {"image_edit", "image-edit", "改图", "修图", "重绘", "p图"}:
+            kind = "edit"
+            requested_kind = "edit"
         if requested_kind == "edit" and not decision_action_allowed(
             decision, "image_edit"
         ):

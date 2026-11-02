@@ -106,6 +106,49 @@ class TaskProgressHookTests(unittest.IsolatedAsyncioTestCase):
         await route.send_task_progress(self.plugin, self.event)
         self.assertNotIn("还没开始调用工具", self.event.send.await_args.args[0])
 
+    def record_image_delivery(self, *, sent=True, deferred=False):
+        result = json.dumps({'status': 'success', 'success': True, 'generation_completed': True,
+                             'sent': sent, 'delivery': 'current', 'delivery_deferred': deferred})
+        route.record_task_tool_event(self.plugin, self.event, SimpleNamespace(name='companion_send_photo'), result)
+
+    async def test_delivered_image_suppresses_automatic_progress(self):
+        self.record_image_delivery()
+        await route.send_task_progress(self.plugin, self.event)
+        self.event.send.assert_not_awaited()
+        self.chat.text_chat.assert_not_awaited()
+        self.assertNotEqual('complete', self.task.status)
+
+    async def test_delivery_during_notice_generation_drops_stale_notice(self):
+        async def model(**kwargs):
+            self.record_image_delivery()
+            return LLMResponse(role='assistant', completion_text='还在等图片，请稍等。')
+        self.chat.text_chat.side_effect = model
+        await route.send_task_progress(self.plugin, self.event)
+        self.event.send.assert_not_awaited()
+
+    async def test_undelivered_image_keeps_progress(self):
+        self.record_image_delivery(sent=False)
+        await route.send_task_progress(self.plugin, self.event)
+        self.event.send.assert_awaited_once()
+
+    async def test_deferred_delivery_does_not_hide_progress(self):
+        self.record_image_delivery(deferred=True)
+        await route.send_task_progress(self.plugin, self.event)
+        self.event.send.assert_awaited_once()
+
+    async def test_next_real_tool_allows_progress_after_partial_delivery(self):
+        self.record_image_delivery()
+        route.record_task_tool_event(self.plugin, self.event, SimpleNamespace(name='read_file'), started=True)
+        await route.send_task_progress(self.plugin, self.event)
+        self.event.send.assert_awaited_once()
+
+    async def test_empty_final_after_delivery_closes_task_without_new_reply(self):
+        self.event._private_companion_conversation_route = 'task'
+        self.record_image_delivery()
+        await route.present_task_response(self.plugin, self.event, LLMResponse(role='assistant', completion_text=''))
+        self.assertEqual('complete', self.task.status)
+        self.chat.text_chat.assert_not_awaited()
+
     async def test_error_word_in_successful_result_is_not_a_failed_task(self):
         self.event._private_companion_conversation_route = "task"
         self.chat.text_chat.return_value = LLMResponse(role="assistant", completion_text="结果在这儿。")

@@ -3812,6 +3812,10 @@ class CommandHandlersMixin:
                     add(source)
             except Exception:
                 pass
+        delayed_sources = getattr(event, "private_companion_delayed_image_sources", None)
+        if isinstance(delayed_sources, list):
+            for source in delayed_sources[:5]:
+                add(source)
         return sources
 
     def _photo_reference_sources_from_reply_cache(self, event: AstrMessageEvent) -> list[str]:
@@ -3890,7 +3894,7 @@ class CommandHandlersMixin:
             return False
         if re.search(
             r"刚才(?:那张|那一张|发的|发过的)?|刚刚(?:那张|那一张|发的|发过的)?|"
-            r"上一张|上张|前一张|之前那张|最近那张|那张图|这张图",
+            r"上一张|上张|前一张|之前那张|最近那张|那张图|这张图|这个图|这幅图|此图|该图",
             compact,
             flags=re.I,
         ):
@@ -3926,7 +3930,8 @@ class CommandHandlersMixin:
             resolved = store.resolve(scope, selected_id)
             if resolved is not None:
                 candidates.append({"image_id": selected_id, "path": str(resolved)})
-        if not candidates and not self._photo_reference_history_prompt_matches(prompt):
+        reference_text = f"{prompt}\n{getattr(event, 'message_str', '')}"
+        if not candidates and not self._photo_reference_history_prompt_matches(reference_text):
             return []
         if not candidates:
             try:

@@ -161,6 +161,7 @@ class PrivateImageVisionHandoffTests(unittest.IsolatedAsyncioTestCase):
             delayed_buffer = harness.delayed_calls[0][2]
             self.assertIsNot(delayed_buffer, original_buffer)
             self.assertIsNot(delayed_buffer["images"], original_buffer["images"])
+            self.assertGreater(delayed_buffer["vision_handoff"]["vision_context_claimed_ts"], 0)
 
             vision_release.set()
             self.assertEqual(await context["vision_task"], "截图里显示一段报错日志")
@@ -193,6 +194,17 @@ class PrivateImageVisionHandoffTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["vision_text"], "图片里是一张日程截图")
         self.assertEqual(first["images"], ["schedule.png"])
         self.assertEqual(second, {})
+
+    async def test_synthetic_image_turn_cannot_claim_its_own_handoff(self):
+        harness = VisionHandoffHarness()
+        event = FakeEvent()
+        event.private_companion_deferred_private_image_only_ready = True
+        key = harness._semantic_buffer_key("private:10001", "10001")
+        handoff = harness._remember_private_image_vision_handoff(
+            key, event, {"images": ["image.png"], "vision_text": "猫咪表情包"}
+        )
+        self.assertEqual({}, harness._take_buffered_private_image_context_for_event(event))
+        self.assertIs(handoff, harness._private_image_vision_handoffs[key])
 
     async def test_expired_handoff_is_ignored_and_cleaned(self):
         harness = VisionHandoffHarness()

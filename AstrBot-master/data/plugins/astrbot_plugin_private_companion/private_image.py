@@ -5129,6 +5129,8 @@ class PrivateImageMixin:
             return False
 
     def _take_buffered_private_image_context_for_event(self, event: AstrMessageEvent) -> dict[str, Any]:
+        if bool(getattr(event, "private_companion_deferred_private_image_only_ready", False)):
+            return {}
         try:
             sender_id = str(event.get_sender_id())
         except Exception:
@@ -5180,6 +5182,7 @@ class PrivateImageMixin:
             )
             return {}
         handoffs.pop(key, None)
+        handoff["vision_context_claimed_ts"] = now
         images = handoff.get("images") if isinstance(handoff.get("images"), list) else []
         image_limit = self._private_image_vision_text_limit(len(images))
         vision_task = handoff.get("vision_task")
@@ -5464,21 +5467,6 @@ class PrivateImageMixin:
         ownership_line = self._private_image_ownership_line(vision_text)
         intent_line = self._private_image_intent_line(vision_text)
         reply_objective = self._private_image_reply_objective(ownership_line, vision_text=vision_text)
-        prompt = _single_line(getattr(event, "message_str", ""), 120)
-        if not prompt or prompt == "[图片]":
-            prompt = (
-                "用户刚刚只发了一张图片,没有补充文字。"
-                "图片内容已在系统提示的【本轮延迟图片】视觉摘要中给出；请直接回应那张图,不要说没看到图片。"
-                "本轮只回应当前图片和用户发图可能表达的态度/梗/疑问；"
-                "但如果最近对话里用户明确规定了这张/下一张图片的回复方式（例如只回复某句话、不要回复其他内容）,必须优先照做。"
-                "除此之外,聊天历史只作语气背景,不要续写、答应或安排旧话题。"
-                if vision_text
-                else (
-                    "用户刚刚只发了一张图片,没有补充文字；但当前没有可靠视觉摘要。"
-                    "不要描述图片内容、场景、天气、人物、表情或文字，也不要根据聊天历史猜图。"
-                    "如果最近对话里用户明确规定了这张/下一张图片的回复方式,必须优先照做；否则只用一句自然短回复说明这边没看清/没识别出来，并请用户补一句想让你看哪里。"
-                )
-            )
         logger.info(
             "[PrivateCompanion] 私聊单图准备进入主链: user=%s images=%s has_vision=%s intent=%s ownership=%s objective=%s vision_preview=%s",
             user_id,
@@ -5595,6 +5583,22 @@ class PrivateImageMixin:
                     user_id,
                     bool(vision_text),
             )
+            handoff = buffer.get("vision_handoff")
+            if isinstance(handoff, dict) and handoff.get("vision_context_claimed_ts"):
+                return
+            prompt = _single_line(getattr(event, "message_str", ""), 120)
+            if not prompt or prompt == "[图片]":
+                prompt = (
+                    "用户刚刚只发了图片或表情包，没有补充文字。"
+                    "结合最近对话里尚未完成的明确要求、当前图片和表情包的文字/情绪判断意图，自然回应或继续已有任务。"
+                    "不要仅因没有文字就要求用户补充，不要机械地描述画面；没有明确任务时按人格接梗或回应情绪。"
+                    "只承接与本图有关的近期语境，不续写无关旧话题。"
+                    if vision_text or direct_image_mode
+                    else (
+                        "用户刚刚只发了图片；当前没有可靠视觉摘要，也未向回复模型提供图片。"
+                        "可承接最近对话里明确等待此图的任务，但不能编造画面；仅在确需画面信息时简短询问关键内容。"
+                    )
+                )
             conv = None
             if umo:
                 getter = getattr(self, "_get_current_conversation_safely", None)
@@ -5630,10 +5634,15 @@ class PrivateImageMixin:
             if direct_image_mode:
                 req.image_urls = list(request_image_refs)
             await self.inject_humanized_state(framework_event, req)
+            hub_decision = getattr(framework_event, "_private_companion_capability_decision", None)
+            if hub_decision is not None and not bool(getattr(hub_decision, "reply", True)):
+                return
+            if isinstance(handoff, dict) and handoff.get("vision_context_claimed_ts"):
+                return
             boundary_intro = (
                 "用户当前只发了一张图片,没有文字补充；但当前没有可靠视觉摘要,本轮也没有把图片直接交给主模型。"
                 "你不能看见图片内容,不要猜测画面、天气、地点、人物、表情、截图文字或图片类型。"
-                "只允许短句请用户补一句想让你看哪里。\n"
+                "可以承接最近明确等待本图的任务；只有确实需要画面细节时才询问，不要固定重复没看清。\n"
                 if not vision_text and not direct_image_mode
                 else "用户当前只发了一张图片,没有文字补充。你的当前任务是回应这张图片本身和用户借图表达的态度/梗/疑问。\n"
             )
@@ -5642,7 +5651,7 @@ class PrivateImageMixin:
                 f"{boundary_intro}"
                 "用户没有明确问‘图里是什么/写了什么/有几个人’时，不要逐项描述主体、衣服、背景和文字；"
                 "把图当作对方递来的一句话，按人格自然评价、接梗、回应情绪或追问一个重点，最多顺带点出一个最显眼细节。\n"
-                "如果最近对话上下文里有用户对本轮图片或下一张图片的明确回复限制,例如“只回复某句话”“不要回复其他内容”,必须优先遵守；这不是旧话题。\n"
+                "最近对话中明确等待本图的改图、识别等任务和回复限制必须承接；表情包也要理解可见文字和表达的情绪，这不是旧话题。\n"
                 "不要把聊天历史、长期记忆、主动消息、旧 TTS 文本或压缩摘要里的邀约当成当前输入；"
                 "不要顺便提下午、五点、放学、出去走走、陪你、到时候叫我等旧约定。"
             )
@@ -5745,6 +5754,10 @@ class PrivateImageMixin:
                     except Exception:
                         pass
             runner = getattr(result, "agent_runner", None) if result else None
+            if bool(getattr(framework_event, "_private_companion_photo_tool_sent", False)):
+                buffer["delayed_reply_sent"] = True
+                buffer["delayed_reply_sent_ts"] = _now_ts()
+                return
             if llm_resp is None:
                 llm_resp = runner.get_final_llm_resp() if runner else None
             if "reply" not in locals():
@@ -5846,6 +5859,8 @@ class PrivateImageMixin:
                     ownership_line or "无",
                     _single_line(reply_preview, 180),
                 )
+            if isinstance(handoff, dict) and handoff.get("vision_context_claimed_ts"):
+                return
             if not reply:
                 if not vision_text and images and has_visual_provider:
                     vision_text = self._completed_private_image_vision_task_text(vision_task)
@@ -5924,6 +5939,8 @@ class PrivateImageMixin:
                 ownership=ownership_line,
                 intent=intent_line,
             )
+            if isinstance(handoff, dict) and handoff.get("vision_context_claimed_ts"):
+                return
             sent_reply = await self._send_private_image_reply_text(event, reply)
             buffer["delayed_reply_sent"] = bool(sent_reply)
             buffer["delayed_reply_sent_ts"] = _now_ts() if sent_reply else 0.0
@@ -5985,6 +6002,7 @@ class PrivateImageMixin:
             if isinstance(original_event, AstrMessageEvent)
             else None
         )
+        delayed_buffer["vision_handoff"] = handoff
         buffers.pop(key, None)
         if isinstance(original_event, AstrMessageEvent):
             try:

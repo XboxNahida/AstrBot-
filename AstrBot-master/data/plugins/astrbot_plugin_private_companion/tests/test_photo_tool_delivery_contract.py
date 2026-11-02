@@ -1477,7 +1477,7 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(public_url, serialized)
 
     async def test_reference_resolution_error_receipt_redacts_local_path(self) -> None:
-        hidden_path = r"PUBLIC_USER_HOME\Pictures\private reference.png"
+        hidden_path = r"C:\AstrBotTest\Pictures\private reference.png"
         harness = _PhotoToolHarness()
 
         async def fail_to_resolve(_event, _user_id):
